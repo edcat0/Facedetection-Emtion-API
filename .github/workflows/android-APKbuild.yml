@@ -5,7 +5,7 @@ on:
     branches: [ "main", "master" ]
   pull_request:
     branches: [ "main", "master" ]
-  workflow_dispatch: # Allows manual one-click trigger from the Actions tab
+  workflow_dispatch: # Allows manual trigger from GitHub Actions tab
 
 jobs:
   build:

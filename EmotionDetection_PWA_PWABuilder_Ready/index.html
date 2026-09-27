@@ -19,7 +19,7 @@
     }
     video#cameraStream {
       position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-      object-fit: cover; transform: scaleX(-1); /* Front camera mirrored by default */
+      object-fit: cover; transform: scaleX(-1); /* Front camera mirrored */
     }
     video#cameraStream.rear-mode {
       transform: scaleX(1);
@@ -29,20 +29,26 @@
       object-fit: cover; z-index: 10; pointer-events: none;
     }
 
-    /* Top HUD Info */
+    /* Top Status Bar */
     #topBar {
       position: absolute; top: 16px; left: 16px; right: 16px;
       display: flex; justify-content: space-between; align-items: center;
       z-index: 40; pointer-events: auto;
     }
     .badge {
-      background: rgba(13, 17, 23, 0.82); color: #00ffc4;
-      padding: 6px 14px; border-radius: 20px; font-size: 13px; font-weight: 600;
-      border: 1px solid rgba(0, 255, 196, 0.3); backdrop-filter: blur(10px);
-      box-shadow: 0 4px 16px rgba(0,0,0,0.6);
+      background: rgba(13, 17, 23, 0.88); color: #00ffc4;
+      padding: 7px 16px; border-radius: 20px; font-size: 13px; font-weight: 600;
+      border: 1px solid rgba(0, 255, 196, 0.35); backdrop-filter: blur(10px);
+      box-shadow: 0 4px 16px rgba(0,0,0,0.6); display: flex; align-items: center; gap: 8px;
     }
+    .status-dot {
+      width: 9px; height: 9px; border-radius: 50%; background: #ff4757;
+      transition: background 0.3s;
+    }
+    .status-dot.active { background: #00ffc4; box-shadow: 0 0 8px #00ffc4; }
+
     .btn-circle {
-      background: rgba(13, 17, 23, 0.82); border: 1px solid rgba(255, 255, 255, 0.25);
+      background: rgba(13, 17, 23, 0.88); border: 1px solid rgba(255, 255, 255, 0.25);
       color: #fff; width: 44px; height: 44px; border-radius: 50%;
       display: flex; justify-content: center; align-items: center;
       cursor: pointer; backdrop-filter: blur(10px);
@@ -57,7 +63,6 @@
       display: flex; justify-content: space-around; align-items: center;
       z-index: 40; padding: 0 24px; pointer-events: auto;
     }
-    /* Photo Shutter Button */
     #photoBtn {
       width: 72px; height: 72px; border-radius: 50%;
       background: #ffffff; border: 5px solid rgba(0, 255, 196, 0.9);
@@ -71,7 +76,6 @@
       background: #ffffff; border: 2px solid #000;
     }
 
-    /* Video Record Button */
     #recordBtn {
       width: 56px; height: 56px; border-radius: 50%;
       background: rgba(13, 17, 23, 0.85); border: 2px solid rgba(255, 71, 87, 0.8);
@@ -87,7 +91,6 @@
       border-radius: 4px; width: 20px; height: 20px;
     }
 
-    /* Permission Prompt overlay if camera blocked */
     #permissionCard {
       position: absolute; z-index: 60; background: rgba(13, 17, 23, 0.95);
       padding: 24px; border-radius: 16px; border: 1px solid #00ffc4;
@@ -105,15 +108,20 @@
       border: 1px solid rgba(0, 255, 196, 0.4); display: none; text-align: center;
     }
   </style>
+
+  <!-- Google MediaPipe Tasks Vision Bundle (FaceLandmarker + Blendshapes) -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.js" crossorigin="anonymous"></script>
 </head>
 <body>
   <div id="stage">
     <video id="cameraStream" autoplay playsinline muted></video>
     <canvas id="hudCanvas"></canvas>
 
-    <!-- Top Bar -->
     <div id="topBar">
-      <div class="badge" id="aiStatus">Emotion AI: Active</div>
+      <div class="badge" id="aiStatus">
+        <div class="status-dot" id="statusDot"></div>
+        <span id="statusText">Scanning for Face...</span>
+      </div>
       <button class="btn-circle" id="flipCamBtn" title="Switch Camera">
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M20 16v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-4"/>
@@ -125,26 +133,20 @@
       </button>
     </div>
 
-    <!-- Notification Toast -->
     <div id="notificationToast"></div>
 
-    <!-- Bottom Controls -->
     <div id="bottomControls">
-      <!-- Record Video -->
       <button id="recordBtn" title="Record Video with Meters">
         <div class="rec-dot"></div>
       </button>
 
-      <!-- Take Photo -->
       <button id="photoBtn" title="Take Photo with Meters">
         <div class="inner"></div>
       </button>
 
-      <!-- Blank Spacer for symmetry -->
       <div style="width: 56px;"></div>
     </div>
 
-    <!-- Camera Permission Request Card -->
     <div id="permissionCard">
       <h3 style="margin-top:0;">Camera Access Required</h3>
       <p style="font-size: 14px; color: #ccc;">Please allow camera access to analyze facial emotions in real time.</p>

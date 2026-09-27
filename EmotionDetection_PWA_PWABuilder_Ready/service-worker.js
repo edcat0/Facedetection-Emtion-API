@@ -1,4 +1,4 @@
-const CACHE_NAME = 'emotion-hud-v2';
+const CACHE_NAME = 'emotion-hud-v3';
 const STATIC_ASSETS = [
   './',
   './index.html',
@@ -31,13 +31,8 @@ self.addEventListener('activate', (e) => {
 
 self.addEventListener('fetch', (e) => {
   e.respondWith(
-    caches.match(e.request).then((cachedResponse) => {
-      if (cachedResponse) return cachedResponse;
-      return fetch(e.request).catch(() => {
-        if (e.request.destination === 'document') {
-          return caches.match('./index.html');
-        }
-      });
-    })
+    caches.match(e.request).then((res) => res || fetch(e.request).catch(() => {
+      if (e.request.destination === 'document') return caches.match('./index.html');
+    }))
   );
 });

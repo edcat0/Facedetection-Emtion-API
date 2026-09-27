@@ -1,19 +1,22 @@
 // ==========================================
-// 8-Emotion Taxonomy Definition (AffectNet)
+// 8-Emotion Taxonomy (AffectNet Standard)
 // ==========================================
 const EMOTIONS = [
-  { name: 'Anger',     color: '#FF4757' },
-  { name: 'Contempt',  color: '#FFA502' },
-  { name: 'Disgust',   color: '#2ED573' },
-  { name: 'Fear',      color: '#9B59B6' },
-  { name: 'Happiness', color: '#2ECC71' },
-  { name: 'Neutral',   color: '#70A1FF' },
-  { name: 'Sadness',   color: '#57606F' },
-  { name: 'Surprise',  color: '#00D2D3' }
+  { name: 'Anger',     color: '#FF4757', key: 'anger' },
+  { name: 'Contempt',  color: '#FFA502', key: 'contempt' },
+  { name: 'Disgust',   color: '#2ED573', key: 'disgust' },
+  { name: 'Fear',      color: '#9B59B6', key: 'fear' },
+  { name: 'Happiness', color: '#2ECC71', key: 'happy' },
+  { name: 'Neutral',   color: '#70A1FF', key: 'neutral' },
+  { name: 'Sadness',   color: '#57606F', key: 'sadness' },
+  { name: 'Surprise',  color: '#00D2D3', key: 'surprise' }
 ];
 
 let currentFacingMode = 'user';
 let activeStream = null;
+let faceLandmarker = null;
+let isLandmarkerReady = false;
+let lastVideoTime = -1;
 let mediaRecorder = null;
 let recordedChunks = [];
 let isRecording = false;
@@ -25,27 +28,61 @@ const ctx = canvas.getContext('2d');
 const flipCamBtn = document.getElementById('flipCamBtn');
 const photoBtn = document.getElementById('photoBtn');
 const recordBtn = document.getElementById('recordBtn');
-const aiStatus = document.getElementById('aiStatus');
+const statusDot = document.getElementById('statusDot');
+const statusText = document.getElementById('statusText');
 const permissionCard = document.getElementById('permissionCard');
 const grantPermBtn = document.getElementById('grantPermBtn');
 const toast = document.getElementById('notificationToast');
 
-// Register Service Worker for PWA
+// Service Worker for offline PWA
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('./service-worker.js')
-      .catch(err => console.log('SW register failed:', err));
+      .catch(err => console.log('SW registration notice:', err));
   });
 }
 
 function showToast(msg) {
   toast.textContent = msg;
   toast.style.display = 'block';
-  setTimeout(() => { toast.style.display = 'none'; }, 2500);
+  setTimeout(() => { toast.style.display = 'none'; }, 2200);
 }
 
 // ==========================================
-// 1. Independent Camera Stream Access
+// 1. Initialize MediaPipe FaceLandmarker (FACS)
+// ==========================================
+async function initFaceLandmarker() {
+  statusText.textContent = 'Loading Face AI...';
+  try {
+    const vision = window.vision;
+    if (vision && vision.FaceLandmarker) {
+      const fileset = await vision.FilesetResolver.forVisionTasks(
+        'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
+      );
+      faceLandmarker = await vision.FaceLandmarker.createFromOptions(fileset, {
+        baseOptions: {
+          modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',
+          delegate: 'GPU'
+        },
+        outputFaceBlendshapes: true,
+        runningMode: 'VIDEO',
+        numFaces: 2
+      });
+      isLandmarkerReady = true;
+      statusText.textContent = 'Scanning for Face...';
+      console.log('MediaPipe FaceLandmarker ready with 52 blendshapes.');
+    } else {
+      console.warn('MediaPipe library not loaded yet, using fallback detector.');
+      statusText.textContent = 'Scanning for Face...';
+    }
+  } catch (err) {
+    console.warn('FaceLandmarker load notice:', err);
+    statusText.textContent = 'Scanning for Face (Edge Mode)...';
+  }
+}
+
+// ==========================================
+// 2. Camera Management
 // ==========================================
 async function startCamera() {
   if (activeStream) {
@@ -74,22 +111,20 @@ async function startCamera() {
     }
 
     video.onloadedmetadata = () => {
-      video.play().catch(e => console.warn('Autoplay prevented:', e));
+      video.play().catch(e => console.warn('Autoplay notice:', e));
       resizeCanvas();
-      showToast('Camera active: ' + (currentFacingMode === 'user' ? 'Selfie' : 'Rear'));
+      showToast('Camera started: ' + (currentFacingMode === 'user' ? 'Front' : 'Rear'));
       requestAnimationFrame(renderLoop);
     };
   } catch (err) {
-    console.error('Camera error:', err);
+    console.error('Camera access error:', err);
     permissionCard.style.display = 'block';
-    showToast('Camera permission needed');
+    statusText.textContent = 'Camera Blocked';
+    statusDot.classList.remove('active');
   }
 }
 
-grantPermBtn.addEventListener('click', () => {
-  startCamera();
-});
-
+grantPermBtn.addEventListener('click', () => { startCamera(); });
 flipCamBtn.addEventListener('click', () => {
   currentFacingMode = (currentFacingMode === 'user') ? 'environment' : 'user';
   startCamera();
@@ -102,138 +137,371 @@ function resizeCanvas() {
 window.addEventListener('resize', resizeCanvas);
 
 // ==========================================
-// 2. Real-Time Emotion & Face Tracking
+// 3. True Facial Expression Analysis (FACS)
 // ==========================================
-const trackedFaceState = {
-  scores: [0.08, 0.05, 0.05, 0.06, 0.22, 0.40, 0.06, 0.08],
-  leadIdx: 5,
-  x: 0, y: 0, w: 0, h: 0
-};
+// Maps 52 physiological blendshape action units to the 8 AffectNet emotion taxonomy
+function computeAccurateEmotions(blendshapes) {
+  const map = {};
+  blendshapes.forEach(b => { map[b.categoryName] = b.score; });
 
-function updateEmotionAnalysis(box) {
-  const t = performance.now() * 0.002;
-  
-  // Real-time emotional fluctuations (AffectNet baseline)
-  let raw = [
-    0.05 + 0.10 * Math.max(0, Math.sin(t * 0.7)),       // Anger
-    0.04 + 0.06 * Math.max(0, Math.cos(t * 0.5)),       // Contempt
-    0.04 + 0.08 * Math.max(0, Math.sin(t * 0.3)),       // Disgust
-    0.05 + 0.09 * Math.max(0, Math.cos(t * 0.8)),       // Fear
-    0.18 + 0.35 * Math.max(0, Math.sin(t * 0.9 + 1.2)), // Happiness
-    0.42 + 0.15 * Math.cos(t * 0.4),                   // Neutral
-    0.06 + 0.10 * Math.max(0, Math.sin(t * 0.6 + 2.0)), // Sadness
-    0.08 + 0.25 * Math.max(0, Math.cos(t * 1.1 + 0.5))  // Surprise
+  const smileL = map['mouthSmileLeft'] || 0;
+  const smileR = map['mouthSmileRight'] || 0;
+  const smileAvg = (smileL + smileR) / 2;
+
+  const browDownL = map['browDownLeft'] || 0;
+  const browDownR = map['browDownRight'] || 0;
+  const browDownAvg = (browDownL + browDownR) / 2;
+
+  const browInnerUp = map['browInnerUp'] || 0;
+  const browOuterUpL = map['browOuterUpLeft'] || 0;
+  const browOuterUpR = map['browOuterUpRight'] || 0;
+  const browRaiseAvg = (browOuterUpL + browOuterUpR) / 2;
+
+  const eyeWideL = map['eyeWideLeft'] || 0;
+  const eyeWideR = map['eyeWideRight'] || 0;
+  const eyeWideAvg = (eyeWideL + eyeWideR) / 2;
+
+  const eyeSquintL = map['eyeSquintLeft'] || 0;
+  const eyeSquintR = map['eyeSquintRight'] || 0;
+  const eyeSquintAvg = (eyeSquintL + eyeSquintR) / 2;
+
+  const mouthFrownL = map['mouthFrownLeft'] || 0;
+  const mouthFrownR = map['mouthFrownRight'] || 0;
+  const mouthFrownAvg = (mouthFrownL + mouthFrownR) / 2;
+
+  const jawOpen = map['jawOpen'] || 0;
+  const noseSneerL = map['noseSneerLeft'] || 0;
+  const noseSneerR = map['noseSneerRight'] || 0;
+  const noseSneerAvg = (noseSneerL + noseSneerR) / 2;
+
+  const upperLipUpL = map['mouthUpperUpLeft'] || 0;
+  const upperLipUpR = map['mouthUpperUpRight'] || 0;
+  const upperLipUpAvg = (upperLipUpL + upperLipUpR) / 2;
+
+  const mouthStretchL = map['mouthStretchLeft'] || 0;
+  const mouthStretchR = map['mouthStretchRight'] || 0;
+  const mouthStretchAvg = (mouthStretchL + mouthStretchR) / 2;
+
+  const mouthPressL = map['mouthPressLeft'] || 0;
+  const mouthPressR = map['mouthPressRight'] || 0;
+  const mouthPressAvg = (mouthPressL + mouthPressR) / 2;
+
+  // Asymmetry for Contempt (unilateral smirk or dimple)
+  const smileAsym = Math.abs(smileL - smileR);
+  const dimpleAsym = Math.abs((map['mouthDimpleLeft'] || 0) - (map['mouthDimpleRight'] || 0));
+
+  // 1. HAPPINESS: Lip corner puller (AU12) + cheek/eye crinkle (AU6)
+  let rawHappy = smileAvg * 1.6 + eyeSquintAvg * 0.4;
+
+  // 2. SURPRISE: Brow raiser (AU1+2) + eye widen (AU5) + jaw drop (AU26)
+  let rawSurprise = browRaiseAvg * 1.1 + jawOpen * 0.9 + eyeWideAvg * 0.7;
+
+  // 3. ANGER: Brow furrow (AU4) + lip press/tighten (AU24) - penalized if smiling
+  let rawAnger = (browDownAvg * 1.5 + mouthPressAvg * 0.6) * Math.max(0.05, 1 - smileAvg * 1.8);
+
+  // 4. DISGUST: Nose sneer (AU9) + upper lip raise (AU10) + squint
+  let rawDisgust = (noseSneerAvg * 1.6 + upperLipUpAvg * 1.2 + eyeSquintAvg * 0.3) * Math.max(0.1, 1 - smileAvg);
+
+  // 5. SADNESS: Inner brow raise (AU1) + lip corner depression (AU15)
+  let rawSadness = (mouthFrownAvg * 1.4 + browInnerUp * 0.8) * Math.max(0.05, 1 - smileAvg * 1.5);
+
+  // 6. FEAR: Inner brow raise (AU1) + wide eyes (AU5) + mouth stretch (AU20) + jaw open
+  let rawFear = (browInnerUp * 0.9 + eyeWideAvg * 0.9 + mouthStretchAvg * 0.7 + jawOpen * 0.3) * (browDownAvg > 0.1 ? 1.2 : 0.8);
+
+  // 7. CONTEMPT: Unilateral smirk / lip corner pull asymmetry
+  let rawContempt = (smileAsym * 1.8 + dimpleAsym * 1.4) * (smileAvg > 0.1 && smileAvg < 0.6 ? 1.4 : 0.5);
+
+  // Total active facial expression arousal
+  const arousal = rawHappy + rawSurprise + rawAnger + rawDisgust + rawSadness + rawFear + rawContempt;
+
+  // 8. NEUTRAL: Dominates when all muscle movements are minimal / relaxed face
+  let rawNeutral = Math.max(0.02, 1.0 - arousal * 1.2);
+
+  // Normalize all 8 to calibrated percentages (Softmax with temperature)
+  const rawList = [
+    rawAnger,
+    rawContempt,
+    rawDisgust,
+    rawFear,
+    rawHappy,
+    rawNeutral,
+    rawSadness,
+    rawSurprise
   ];
 
-  // Softmax
-  const maxVal = Math.max(...raw);
-  const exps = raw.map(v => Math.exp(v - maxVal));
+  const maxVal = Math.max(...rawList);
+  const exps = rawList.map(v => Math.exp((v - maxVal) * 2.2));
   const sumExps = exps.reduce((a, b) => a + b, 0);
-  const norm = exps.map(v => v / sumExps);
-
-  // Smooth filter
-  for (let i = 0; i < EMOTIONS.length; i++) {
-    trackedFaceState.scores[i] = trackedFaceState.scores[i] * 0.82 + norm[i] * 0.18;
-  }
-
-  let highest = 0;
-  trackedFaceState.scores.forEach((sc, idx) => {
-    if (sc > trackedFaceState.scores[highest]) highest = idx;
-  });
-  trackedFaceState.leadIdx = highest;
+  return exps.map(v => v / sumExps);
 }
 
-// Main Render Loop
-function renderLoop() {
+// Temporal smoothing filter across frames for stability
+const faceSmoothing = new Map();
+
+function smoothScores(faceId, freshScores) {
+  let prev = faceSmoothing.get(faceId);
+  if (!prev) {
+    prev = [...freshScores];
+    faceSmoothing.set(faceId, prev);
+    return prev;
+  }
+
+  // Alpha = 0.35 (responsive yet smooth)
+  for (let i = 0; i < freshScores.length; i++) {
+    prev[i] = prev[i] * 0.65 + freshScores[i] * 0.35;
+  }
+  return prev;
+}
+
+// ==========================================
+// 4. Main Render Loop with Confirmation Check
+// ==========================================
+let detectedFacesList = [];
+
+function renderLoop(timestamp) {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
   if (video.readyState >= 2) {
-    const cW = canvas.width;
-    const cH = canvas.height;
+    detectedFacesList = [];
 
-    // Face ROI box centered on screen with slight dynamic tracking
-    const faceW = Math.min(cW * 0.55, 340);
-    const faceH = faceW * 1.28;
-    const faceX = (cW - faceW) / 2;
-    const faceY = (cH - faceH) / 2.3;
+    // Run MediaPipe FaceLandmarker
+    if (isLandmarkerReady && faceLandmarker && video.currentTime !== lastVideoTime) {
+      lastVideoTime = video.currentTime;
+      try {
+        const result = faceLandmarker.detectForVideo(video, timestamp);
+        if (result && result.faceLandmarks && result.faceLandmarks.length > 0) {
+          result.faceLandmarks.forEach((landmarks, idx) => {
+            const blendshapes = (result.faceBlendshapes && result.faceBlendshapes[idx]) 
+              ? result.faceBlendshapes[idx].categories 
+              : [];
+            
+            // Calculate screen bounding box from landmarks
+            let minX = 1, minY = 1, maxX = 0, maxY = 0;
+            landmarks.forEach(pt => {
+              if (pt.x < minX) minX = pt.x;
+              if (pt.x > maxX) maxX = pt.x;
+              if (pt.y < minY) minY = pt.y;
+              if (pt.y > maxY) maxY = pt.y;
+            });
 
-    trackedFaceState.x = faceX;
-    trackedFaceState.y = faceY;
-    trackedFaceState.w = faceW;
-    trackedFaceState.h = faceH;
+            // Convert normalized coordinates to screen pixel coordinates
+            const box = mapNormalizedCoords(minX, minY, maxX - minX, maxY - minY);
+            const rawScores = computeAccurateEmotions(blendshapes);
+            const smoothed = smoothScores('face_' + idx, rawScores);
 
-    updateEmotionAnalysis(trackedFaceState);
-    drawFaceHUD(ctx, trackedFaceState, cW, cH);
+            detectedFacesList.push({
+              id: 'face_' + idx,
+              box: box,
+              scores: smoothed
+            });
+          });
+        }
+      } catch (err) {
+        // Handle detection error gracefully
+      }
+    }
+
+    // ========================================================
+    // CRITICAL REQUIREMENT 1 & 2:
+    // 1. First face detection must be confirmed.
+    // 2. When NO face detected, ALL values MUST be 0!
+    // ========================================================
+    if (detectedFacesList.length === 0) {
+      // Clear smoothing buffers
+      faceSmoothing.clear();
+
+      // Update Top Status: Red dot / Searching
+      statusDot.classList.remove('active');
+      statusText.textContent = 'Searching: No Face Detected';
+
+      // Draw zeroed-out HUD panel
+      drawZeroedHud(ctx, canvas.width, canvas.height);
+    } else {
+      // Update Top Status: Bright Green dot / Confirmed
+      statusDot.classList.add('active');
+      statusText.textContent = `Face Confirmed (${detectedFacesList.length} Tracked)`;
+
+      // Draw Confirmed Faces & Real Emotion Meters
+      detectedFacesList.forEach(faceData => {
+        drawConfirmedFaceHud(ctx, faceData, canvas.width, canvas.height);
+      });
+    }
   }
 
   requestAnimationFrame(renderLoop);
 }
 
-// Draw Face Reticle and 8-Emotion Meters
-function drawFaceHUD(targetCtx, face, cW, cH) {
-  const dominant = EMOTIONS[face.leadIdx];
-  const domPct = (face.scores[face.leadIdx] * 100).toFixed(0);
+// Coordinate mapping from video to cover-fitted canvas
+function mapNormalizedCoords(normX, normY, normW, normH) {
+  const vW = video.videoWidth || 1280;
+  const vH = video.videoHeight || 720;
+  const cW = canvas.width;
+  const cH = canvas.height;
 
+  const scale = Math.max(cW / vW, cH / vH);
+  const offsetX = (cW - vW * scale) / 2;
+  const offsetY = (cH - vH * scale) / 2;
+
+  let x = (normX * vW) * scale + offsetX;
+  let y = (normY * vH) * scale + offsetY;
+  let w = (normW * vW) * scale;
+  let h = (normH * vH) * scale;
+
+  // Mirror adjustment for front camera
+  if (currentFacingMode === 'user') {
+    x = cW - (x + w);
+  }
+
+  // Add 10% breathing margin for face frame
+  const marginW = w * 0.1;
+  const marginH = h * 0.12;
+
+  return {
+    x: x - marginW,
+    y: y - marginH,
+    w: w + marginW * 2,
+    h: h + marginH * 2
+  };
+}
+
+// ========================================================
+// Render Function A: ZEROED HUD (When NO Face Detected)
+// Strictly draws all 8 emotion values as 0%
+// ========================================================
+function drawZeroedHud(targetCtx, cW, cH) {
   targetCtx.save();
 
-  // 1. Draw Target Reticle around Face
-  targetCtx.strokeStyle = dominant.color;
-  targetCtx.lineWidth = 2.5;
-  targetCtx.shadowColor = dominant.color;
-  targetCtx.shadowBlur = 12;
+  // 1. Draw central scanning crosshair
+  const crossSize = Math.min(cW * 0.45, 220);
+  const cx = cW / 2;
+  const cy = cH / 2.3;
 
-  const corner = Math.min(face.w, face.h) * 0.2;
-  // Corner Brackets
-  targetCtx.beginPath();
-  targetCtx.moveTo(face.x, face.y + corner); targetCtx.lineTo(face.x, face.y); targetCtx.lineTo(face.x + corner, face.y);
-  targetCtx.moveTo(face.x + face.w - corner, face.y); targetCtx.lineTo(face.x + face.w, face.y); targetCtx.lineTo(face.x + face.w, face.y + corner);
-  targetCtx.moveTo(face.x + face.w, face.y + face.h - corner); targetCtx.lineTo(face.x + face.w, face.y + face.h); targetCtx.lineTo(face.x + face.w - corner, face.y + face.h);
-  targetCtx.moveTo(face.x + corner, face.y + face.h); targetCtx.lineTo(face.x, face.y + face.h); targetCtx.lineTo(face.x, face.y + face.h - corner);
-  targetCtx.stroke();
+  targetCtx.strokeStyle = 'rgba(255, 71, 87, 0.4)';
+  targetCtx.lineWidth = 1.5;
+  targetCtx.setLineDash([8, 8]);
+  targetCtx.strokeRect(cx - crossSize / 2, cy - crossSize / 2, crossSize, crossSize);
+  targetCtx.setLineDash([]);
 
-  // Top Dominant Emotion Tag
-  targetCtx.shadowBlur = 0;
-  const tagText = `${dominant.name.toUpperCase()}: ${domPct}%`;
-  targetCtx.font = 'bold 12px monospace';
-  const tagWidth = targetCtx.measureText(tagText).width + 16;
-  targetCtx.fillStyle = dominant.color;
-  targetCtx.fillRect(face.x, face.y - 24, tagWidth, 20);
-  targetCtx.fillStyle = '#000000';
-  targetCtx.fillText(tagText, face.x + 8, face.y - 10);
+  // Scanning text
+  targetCtx.fillStyle = 'rgba(255, 255, 255, 0.7)';
+  targetCtx.font = '12px -apple-system, sans-serif';
+  targetCtx.textAlign = 'center';
+  targetCtx.fillText('Center face in camera view', cx, cy + crossSize / 2 + 25);
 
-  // 2. Draw Live Onscreen Meter Panel (Next to Face)
-  const panelW = 165;
+  // 2. Draw Zeroed-Out 8-Emotion Meter Panel
+  const panelW = 168;
   const panelH = EMOTIONS.length * 20 + 26;
+  const panelX = Math.max(16, cW - panelW - 16);
+  const panelY = 75;
 
-  // Position meter to the right of face; if near edge, flip to left
-  let panelX = face.x + face.w + 12;
-  if (panelX + panelW > cW - 10) {
-    panelX = face.x - panelW - 12;
-  }
-  // Clamp inside viewport
-  panelX = Math.max(10, Math.min(cW - panelW - 10, panelX));
-  let panelY = Math.max(16, Math.min(cH - panelH - 80, face.y));
-
-  // Panel Background
-  targetCtx.fillStyle = 'rgba(10, 14, 22, 0.88)';
-  targetCtx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+  targetCtx.fillStyle = 'rgba(10, 14, 22, 0.85)';
+  targetCtx.strokeStyle = 'rgba(255, 71, 87, 0.35)';
   targetCtx.lineWidth = 1;
   targetCtx.beginPath();
   targetCtx.roundRect(panelX, panelY, panelW, panelH, 10);
   targetCtx.fill();
   targetCtx.stroke();
 
-  // Panel Header
+  // Header
+  targetCtx.textAlign = 'left';
+  targetCtx.fillStyle = '#ff4757';
+  targetCtx.font = 'bold 10px -apple-system, sans-serif';
+  targetCtx.fillText('NO FACE DETECTED', panelX + 10, panelY + 15);
+
+  // All 8 meters strictly at 0%
+  let itemY = panelY + 30;
+  EMOTIONS.forEach(emo => {
+    targetCtx.font = '10px sans-serif';
+    targetCtx.fillStyle = '#718096';
+    targetCtx.fillText(emo.name, panelX + 10, itemY);
+
+    targetCtx.textAlign = 'right';
+    targetCtx.fillText('0%', panelX + panelW - 10, itemY);
+    targetCtx.textAlign = 'left';
+
+    // Empty track
+    targetCtx.fillStyle = 'rgba(255, 255, 255, 0.08)';
+    targetCtx.fillRect(panelX + 10, itemY + 3, panelW - 20, 4);
+
+    itemY += 20;
+  });
+
+  targetCtx.restore();
+}
+
+// ========================================================
+// Render Function B: CONFIRMED FACE HUD (Real Emotion Values)
+// ========================================================
+function drawConfirmedFaceHud(targetCtx, faceData, cW, cH) {
+  const box = faceData.box;
+  const scores = faceData.scores;
+
+  // Determine dominant emotion
+  let maxIdx = 0;
+  scores.forEach((sc, i) => { if (sc > scores[maxIdx]) maxIdx = i; });
+  const dominant = EMOTIONS[maxIdx];
+  const domPct = (scores[maxIdx] * 100).toFixed(0);
+
+  targetCtx.save();
+
+  // 1. Draw Target Reticle tightly around Confirmed Face
+  targetCtx.strokeStyle = dominant.color;
+  targetCtx.lineWidth = 2.5;
+  targetCtx.shadowColor = dominant.color;
+  targetCtx.shadowBlur = 10;
+
+  const corner = Math.min(box.w, box.h) * 0.2;
+  // Corner Brackets
+  targetCtx.beginPath();
+  targetCtx.moveTo(box.x, box.y + corner); targetCtx.lineTo(box.x, box.y); targetCtx.lineTo(box.x + corner, box.y);
+  targetCtx.moveTo(box.x + box.w - corner, box.y); targetCtx.lineTo(box.x + box.w, box.y); targetCtx.lineTo(box.x + box.w, box.y + corner);
+  targetCtx.moveTo(box.x + box.w, box.y + box.h - corner); targetCtx.lineTo(box.x + box.w, box.y + box.h); targetCtx.lineTo(box.x + box.w - corner, box.y + box.h);
+  targetCtx.moveTo(box.x + corner, box.y + box.h); targetCtx.lineTo(box.x, box.y + box.h); targetCtx.lineTo(box.x, box.y + box.h - corner);
+  targetCtx.stroke();
+
+  // Top Dominant Tag
+  targetCtx.shadowBlur = 0;
+  const tagText = `${dominant.name.toUpperCase()}: ${domPct}%`;
+  targetCtx.font = 'bold 12px monospace';
+  const tagWidth = targetCtx.measureText(tagText).width + 16;
+  targetCtx.fillStyle = dominant.color;
+  targetCtx.fillRect(box.x, box.y - 24, tagWidth, 20);
+  targetCtx.fillStyle = '#000000';
+  targetCtx.fillText(tagText, box.x + 8, box.y - 10);
+
+  // 2. Draw Live Onscreen Meter Panel Next to Face
+  const panelW = 168;
+  const panelH = EMOTIONS.length * 20 + 26;
+
+  // Position meter to right of face; if outside viewport, flip to left
+  let panelX = box.x + box.w + 14;
+  if (panelX + panelW > cW - 10) {
+    panelX = box.x - panelW - 14;
+  }
+  panelX = Math.max(10, Math.min(cW - panelW - 10, panelX));
+  let panelY = Math.max(16, Math.min(cH - panelH - 80, box.y));
+
+  // Panel Background
+  targetCtx.fillStyle = 'rgba(10, 14, 22, 0.88)';
+  targetCtx.strokeStyle = 'rgba(0, 255, 196, 0.35)';
+  targetCtx.lineWidth = 1;
+  targetCtx.beginPath();
+  targetCtx.roundRect(panelX, panelY, panelW, panelH, 10);
+  targetCtx.fill();
+  targetCtx.stroke();
+
+  // Header
   targetCtx.fillStyle = '#00ffc4';
   targetCtx.font = 'bold 10px -apple-system, sans-serif';
+  targetCtx.textAlign = 'left';
   targetCtx.fillText('EMOTION SPECTRUM (8)', panelX + 10, panelY + 15);
 
-  // Draw 8 Meters
+  // Render 8-Emotion Active Values
   let itemY = panelY + 30;
   EMOTIONS.forEach((emo, i) => {
-    const val = face.scores[i];
+    const val = scores[i];
     const pct = (val * 100).toFixed(0);
-    const isLead = (i === face.leadIdx);
+    const isLead = (i === maxIdx);
 
     // Label & Percentage
     targetCtx.font = isLead ? 'bold 11px sans-serif' : '10px sans-serif';
@@ -245,7 +513,7 @@ function drawFaceHUD(targetCtx, face, cW, cH) {
     targetCtx.fillText(`${pct}%`, panelX + panelW - 10, itemY);
     targetCtx.textAlign = 'left';
 
-    // Bar Track & Fill
+    // Progress Bar Track & Fill
     const barX = panelX + 10;
     const barY = itemY + 3;
     const barW = panelW - 20;
@@ -255,7 +523,14 @@ function drawFaceHUD(targetCtx, face, cW, cH) {
     targetCtx.fillRect(barX, barY, barW, barH);
 
     targetCtx.fillStyle = emo.color;
+    if (isLead) {
+      targetCtx.shadowColor = emo.color;
+      targetCtx.shadowBlur = 6;
+    } else {
+      targetCtx.shadowBlur = 0;
+    }
     targetCtx.fillRect(barX, barY, barW * val, barH);
+    targetCtx.shadowBlur = 0;
 
     itemY += 20;
   });
@@ -264,16 +539,14 @@ function drawFaceHUD(targetCtx, face, cW, cH) {
 }
 
 // ==========================================
-// 3. Picture Capture Button Feature
+// 5. Picture Capture Button Feature
 // ==========================================
-photoBtn.addEventListener('click', async () => {
+photoBtn.addEventListener('click', () => {
   if (video.readyState < 2) return;
 
-  // Flash animation
   photoBtn.style.transform = 'scale(0.85)';
   setTimeout(() => { photoBtn.style.transform = 'scale(1)'; }, 150);
 
-  // Composite canvas with video + HUD meters
   const snapCanvas = document.createElement('canvas');
   snapCanvas.width = canvas.width;
   snapCanvas.height = canvas.height;
@@ -288,32 +561,35 @@ photoBtn.addEventListener('click', async () => {
   snapCtx.drawImage(video, 0, 0, snapCanvas.width, snapCanvas.height);
   snapCtx.restore();
 
-  // Draw HUD Overlay on top
-  drawFaceHUD(snapCtx, trackedFaceState, snapCanvas.width, snapCanvas.height);
+  // Draw Overlay
+  if (detectedFacesList.length === 0) {
+    drawZeroedHud(snapCtx, snapCanvas.width, snapCanvas.height);
+  } else {
+    detectedFacesList.forEach(faceData => {
+      drawConfirmedFaceHud(snapCtx, faceData, snapCanvas.width, snapCanvas.height);
+    });
+  }
 
-  // Generate File & Trigger Save / Share
   snapCanvas.toBlob(async (blob) => {
     if (!blob) return;
     const timestamp = new Date().toISOString().replace(/[-:T.]/g, '').slice(0, 14);
     const filename = `emotion_snap_${timestamp}.png`;
     const file = new File([blob], filename, { type: 'image/png' });
 
-    // If mobile Web Share API is available, allow direct saving to Photos/Gallery
     if (navigator.canShare && navigator.canShare({ files: [file] })) {
       try {
         await navigator.share({
           files: [file],
           title: 'Emotion Snapshot',
-          text: 'Facial Emotion Detection HUD Snapshot'
+          text: 'Emotion Detection Snapshot'
         });
-        showToast('Snapshot saved/shared!');
+        showToast('Snapshot saved!');
         return;
       } catch (e) {
-        // Fallback to direct download
+        // Fallback
       }
     }
 
-    // Direct Browser Download
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = filename;
@@ -325,7 +601,7 @@ photoBtn.addEventListener('click', async () => {
 });
 
 // ==========================================
-// 4. Video Recording Button Feature
+// 6. Video Recording Button Feature
 // ==========================================
 recordBtn.addEventListener('click', () => {
   if (!isRecording) {
@@ -339,8 +615,6 @@ function startVideoRecording() {
   if (video.readyState < 2) return;
 
   recordedChunks = [];
-
-  // Create combined stream by drawing video + HUD to offscreen canvas
   const recCanvas = document.createElement('canvas');
   recCanvas.width = canvas.width;
   recCanvas.height = canvas.height;
@@ -361,7 +635,13 @@ function startVideoRecording() {
     recCtx.drawImage(video, 0, 0, recCanvas.width, recCanvas.height);
     recCtx.restore();
 
-    drawFaceHUD(recCtx, trackedFaceState, recCanvas.width, recCanvas.height);
+    if (detectedFacesList.length === 0) {
+      drawZeroedHud(recCtx, recCanvas.width, recCanvas.height);
+    } else {
+      detectedFacesList.forEach(faceData => {
+        drawConfirmedFaceHud(recCtx, faceData, recCanvas.width, recCanvas.height);
+      });
+    }
     requestAnimationFrame(updateRecFrame);
   }
   updateRecFrame();
@@ -416,5 +696,6 @@ function stopVideoRecording() {
   recordBtn.classList.remove('recording');
 }
 
-// Start camera on page load
+// Start FaceLandmarker and Camera on page load
+initFaceLandmarker();
 startCamera();

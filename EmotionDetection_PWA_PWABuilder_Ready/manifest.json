@@ -3,7 +3,7 @@
   "name": "Emotion Detection HUD",
   "short_name": "EmotionHUD",
   "id": "emotion-detection-hud",
-  "description": "Real-time 8-emotion facial analysis camera app with HUD meters and photo/video capture.",
+  "description": "Real-time 8-emotion facial analysis camera app with confirmed face detection and live HUD meters.",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
@@ -32,7 +32,7 @@
       "sizes": "720x1280",
       "type": "image/png",
       "form_factor": "narrow",
-      "label": "Live Camera Feed with Emotion Meters"
+      "label": "Live Camera Feed with Confirmed Face Detection"
     }
   ]
 }

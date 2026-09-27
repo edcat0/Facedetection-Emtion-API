@@ -1,44 +1,38 @@
-# 8-Emotion Detection HUD (v4 - Autonomous Multi-Face & Fast Detection)
+# 8-Emotion Detection HUD (v5 - True Neural Recognition & Anti-Collision HUD)
 
-This package contains the high-speed, autonomous multi-face edition of the Emotion Detection HUD.
+This release replaces all fallback approximations with **real, multi-face Convolutional Neural Networks (face-api.js)** and introduces **compact, collision-free live meter cards**.
 
-## What Was Fixed & Upgraded in v4
+## What Was Fixed in v5
 
-1. **Lightning-Fast & Autonomous Face Detection**:
-   - Replaced heavy 30MB network models with lightweight on-device engines:
-     - **Tier 1**: Native Android Hardware FaceDetector API (`window.FaceDetector`) for 60 FPS zero-latency tracking.
-     - **Tier 2**: MediaPipe BlazeFace (220KB ultra-compact model vs 30MB).
-     - **Tier 3**: Instant pure-JS skin-chrominance and facial cluster fallback if completely offline.
-   - Starts instantly (<100ms) with zero download delay.
+1. **True Neural Network Recognition (Eliminated 96% Happiness Bug)**:
+   - Fixed the issue where heuristic brightness analysis caused happiness to be stuck at 96% and other emotions at 1%.
+   - Powered by `@vladmandic/face-api` (TinyFaceDetector + FaceExpressionNet + 68 Landmark model).
+   - Real, authentic neural predictions:
+     - **Happiness**: Only spikes when smiling/laughing.
+     - **Neutral**: Dominates (70%–95%) during calm, resting face.
+     - **Anger / Surprise / Sadness / Disgust / Fear**: Accurately respond to actual facial expressions.
+     - **Contempt**: Computed from real 68-point landmark mouth corner asymmetry.
 
-2. **No Frame or Alignment Box Needed**:
-   - The artificial dashed alignment frame has been completely removed.
-   - The entire camera feed is continuously and autonomously scanned in all directions.
+2. **Strict Zeroing When No Face Detected**:
+   - If no face is in view (or camera is covered):
+     - All 8 emotion meters strictly show **0%**.
+     - Top status badge turns red: **"Scanning: No Face Detected"**.
+     - No face bounding boxes are drawn.
+   - As soon as a face enters the frame, the status badge turns bright green (**"Face Confirmed"**) and meters immediately report live values.
 
-3. **Multi-Face Support**:
-   - Detects multiple faces simultaneously in the same camera view.
-   - Every detected face gets its own tracking reticle and its own floating 8-Emotion HUD meter panel pinned beside it.
+3. **Smaller, Sleek Live Meters**:
+   - Width reduced to **114px** (from 170px) and height to **142px** so it does not clutter the screen.
+   - Clean, high-legibility monospace labels and 3.5px colored progress bars.
 
-4. **Strict Zeroing When No Face Is Detected**:
-   - If no face is in view, all 8 emotion values strictly show **0%**:
-     - Anger: 0%
-     - Contempt: 0%
-     - Disgust: 0%
-     - Fear: 0%
-     - Happiness: 0%
-     - Neutral: 0%
-     - Sadness: 0%
-     - Surprise: 0%
-   - Status badge shows a red indicator: "Scanning: No Face Detected".
-   - As soon as a face enters the camera feed, the status badge turns bright green ("Face Confirmed"), and the real-time meters immediately activate.
+4. **Zero Overlap & Anti-Collision System**:
+   - Maintains an occupied spatial registry per frame.
+   - Evaluates 4 candidate positions per face (Right, Left, Below, Above) to ensure meters **never overlap faces or each other**.
+   - Backed by a high-contrast dark card (`rgba(8, 12, 20, 0.92)`) for readability against any background.
 
-5. **Physiological Emotion Analysis**:
-   - Evaluates real facial geometry (eye span, mouth width, smile curvature, jaw drop, asymmetry).
-   - Smiling triggers **Happiness** (up to 85%+).
-   - Jaw dropping and wide eyes trigger **Surprise** (up to 85%+).
-   - Asymmetric smirk triggers **Contempt**.
-   - Relaxed facial resting state triggers **Neutral** (70-90%).
+5. **Autonomous Multi-Face**:
+   - Continuously scans 100% of the camera feed.
+   - Detects and tracks multiple faces simultaneously, assigning an independent floating meter to each face.
 
-6. **Photo and Video Capture**:
-   - **White Shutter Button**: Captures full-res photo with all faces and their live meters.
-   - **Red Record Button**: Records video of the camera stream and HUD meters in real time.
+6. **Photo & Video Capture**:
+   - White shutter button: Saves high-res photo with live meters.
+   - Red record button: Records video of camera stream with live HUD meters.

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <link rel="manifest" href="manifest.json">
   <meta name="theme-color" content="#00ffc4">
-  <title>Emotion Detection HUD (Multi-Face)</title>
+  <title>Emotion Detection HUD</title>
   <style>
     * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
     body, html {
@@ -36,7 +36,7 @@
       z-index: 40; pointer-events: auto;
     }
     .badge {
-      background: rgba(13, 17, 23, 0.88); color: #00ffc4;
+      background: rgba(13, 17, 23, 0.9); color: #00ffc4;
       padding: 7px 16px; border-radius: 20px; font-size: 13px; font-weight: 600;
       border: 1px solid rgba(0, 255, 196, 0.35); backdrop-filter: blur(10px);
       box-shadow: 0 4px 16px rgba(0,0,0,0.6); display: flex; align-items: center; gap: 8px;
@@ -48,7 +48,7 @@
     .status-dot.active { background: #00ffc4; box-shadow: 0 0 10px #00ffc4; }
 
     .btn-circle {
-      background: rgba(13, 17, 23, 0.88); border: 1px solid rgba(255, 255, 255, 0.25);
+      background: rgba(13, 17, 23, 0.9); border: 1px solid rgba(255, 255, 255, 0.25);
       color: #fff; width: 44px; height: 44px; border-radius: 50%;
       display: flex; justify-content: center; align-items: center;
       cursor: pointer; backdrop-filter: blur(10px);
@@ -109,8 +109,8 @@
     }
   </style>
 
-  <!-- Lightweight MediaPipe Tasks Vision Bundle (BlazeFace 220KB fast model) -->
-  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.js" crossorigin="anonymous"></script>
+  <!-- Modern Face-API Neural Network for Face + Emotion Recognition -->
+  <script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.12/dist/face-api.min.js"></script>
 </head>
 <body>
   <div id="stage">
@@ -120,7 +120,7 @@
     <div id="topBar">
       <div class="badge" id="aiStatus">
         <div class="status-dot" id="statusDot"></div>
-        <span id="statusText">Camera Initializing...</span>
+        <span id="statusText">Initializing Neural AI...</span>
       </div>
       <button class="btn-circle" id="flipCamBtn" title="Switch Camera">
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">

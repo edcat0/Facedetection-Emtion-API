@@ -3,7 +3,7 @@
   "name": "Emotion Detection HUD",
   "short_name": "EmotionHUD",
   "id": "emotion-detection-hud",
-  "description": "High-accuracy real-time multi-face emotion recognition HUD with compact non-overlapping meters.",
+  "description": "Multi-face real-time 8-emotion AI camera with front/rear camera switching and HUD meters.",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
@@ -32,7 +32,7 @@
       "sizes": "720x1280",
       "type": "image/png",
       "form_factor": "narrow",
-      "label": "Accurate Live Emotion HUD"
+      "label": "Front and Rear Camera Emotion HUD"
     }
   ]
 }

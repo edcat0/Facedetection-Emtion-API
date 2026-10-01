@@ -16,6 +16,8 @@ let currentFacingMode = 'user';
 let activeStream = null;
 let isModelsLoaded = false;
 let isDetecting = false;
+let lastInferenceTime = 0;
+let isSwitchingCamera = false;
 let mediaRecorder = null;
 let recordedChunks = [];
 let isRecording = false;
@@ -44,7 +46,7 @@ if ('serviceWorker' in navigator) {
 function showToast(msg) {
   toast.textContent = msg;
   toast.style.display = 'block';
-  setTimeout(() => { toast.style.display = 'none'; }, 2000);
+  setTimeout(() => { toast.style.display = 'none'; }, 2200);
 }
 
 // ==========================================
@@ -78,13 +80,9 @@ async function loadNeuralModels() {
 }
 
 // ==========================================
-// 2. Camera Stream Management
+// 2. Camera Management with Clean Switching
 // ==========================================
 async function startCamera() {
-  if (activeStream) {
-    activeStream.getTracks().forEach(track => track.stop());
-  }
-
   permissionCard.style.display = 'none';
 
   const constraints = {
@@ -98,33 +96,78 @@ async function startCamera() {
 
   try {
     activeStream = await navigator.mediaDevices.getUserMedia(constraints);
-    video.srcObject = activeStream;
-
-    if (currentFacingMode === 'user') {
-      video.classList.remove('rear-mode');
-    } else {
-      video.classList.add('rear-mode');
-    }
-
-    video.onloadedmetadata = () => {
-      video.play().catch(e => console.warn('Autoplay notice:', e));
-      resizeCanvas();
-      showToast('Camera active: ' + (currentFacingMode === 'user' ? 'Front' : 'Rear'));
-      requestAnimationFrame(mainRenderLoop);
-    };
   } catch (err) {
-    console.error('Camera access error:', err);
-    permissionCard.style.display = 'block';
-    statusText.textContent = 'Camera Blocked';
-    statusDot.classList.remove('active');
+    console.warn('Initial camera constraint failed, retrying simple constraint...', err);
+    try {
+      activeStream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { facingMode: currentFacingMode }
+      });
+    } catch (fallbackErr) {
+      console.error('Camera access completely blocked:', fallbackErr);
+      permissionCard.style.display = 'block';
+      statusText.textContent = 'Camera Blocked';
+      statusDot.classList.remove('active');
+      return;
+    }
   }
+
+  video.srcObject = activeStream;
+
+  if (currentFacingMode === 'user') {
+    video.classList.remove('rear-mode');
+  } else {
+    video.classList.add('rear-mode');
+  }
+
+  // Await playback explicitly
+  try {
+    await video.play();
+  } catch (playErr) {
+    console.warn('Video play warning:', playErr);
+  }
+
+  resizeCanvas();
+  showToast('Camera active: ' + (currentFacingMode === 'user' ? 'Front (Selfie)' : 'Rear'));
+}
+
+// Bulletproof Front/Rear Camera Switching
+async function switchCamera() {
+  if (isSwitchingCamera) return;
+  isSwitchingCamera = true;
+  flipCamBtn.disabled = true;
+
+  // 1. Reset state and release detection lock
+  isDetecting = false;
+  detectedFacesData = [];
+  faceSmoother.clear();
+
+  // 2. Stop existing tracks cleanly
+  if (activeStream) {
+    activeStream.getTracks().forEach(track => {
+      try { track.stop(); } catch (e) {}
+    });
+    activeStream = null;
+  }
+  video.srcObject = null;
+
+  // 3. Toggle facing mode
+  currentFacingMode = (currentFacingMode === 'user') ? 'environment' : 'user';
+  statusText.textContent = 'Switching Camera...';
+  statusDot.classList.remove('active');
+
+  // 4. CRITICAL: Wait 250ms for Android Camera HAL to cleanly release hardware
+  await new Promise(resolve => setTimeout(resolve, 250));
+
+  // 5. Start new camera
+  await startCamera();
+
+  isSwitchingCamera = false;
+  flipCamBtn.disabled = false;
 }
 
 grantPermBtn.addEventListener('click', () => { startCamera(); });
-flipCamBtn.addEventListener('click', () => {
-  currentFacingMode = (currentFacingMode === 'user') ? 'environment' : 'user';
-  startCamera();
-});
+flipCamBtn.addEventListener('click', switchCamera);
 
 function resizeCanvas() {
   canvas.width = window.innerWidth;
@@ -139,16 +182,41 @@ let detectedFacesData = [];
 const faceSmoother = new Map();
 
 async function runFaceEmotionInference() {
-  if (!isModelsLoaded || video.readyState < 2 || isDetecting) return;
+  // Pre-condition guards: must have model, active video frame, and no stuck lock
+  if (!isModelsLoaded || !video || video.paused || video.ended || video.readyState < 2 || isSwitchingCamera) {
+    return;
+  }
+
+  // Ensure video dimensions are valid
+  if (!video.videoWidth || !video.videoHeight || video.videoWidth < 10) {
+    return;
+  }
+
+  // Watchdog timer: if previous detection is taking > 1200ms, unlock it
+  if (isDetecting) {
+    if (Date.now() - lastInferenceTime > 1200) {
+      console.warn('Watchdog: resetting stuck detection lock');
+      isDetecting = false;
+    } else {
+      return;
+    }
+  }
 
   isDetecting = true;
+  lastInferenceTime = Date.now();
+
   try {
-    // Autonomous Multi-Face Detection across the entire video feed
     const options = new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.35 });
     const detections = await faceapi
       .detectAllFaces(video, options)
       .withFaceLandmarks()
       .withFaceExpressions();
+
+    // Check if camera switch started while detecting
+    if (isSwitchingCamera || !video.srcObject) {
+      isDetecting = false;
+      return;
+    }
 
     if (!detections || detections.length === 0) {
       detectedFacesData = [];
@@ -157,9 +225,8 @@ async function runFaceEmotionInference() {
       return;
     }
 
-    // Map detections to screen coordinates
-    const vW = video.videoWidth || 1280;
-    const vH = video.videoHeight || 720;
+    const vW = video.videoWidth;
+    const vH = video.videoHeight;
     const cW = canvas.width;
     const cH = canvas.height;
     const scale = Math.max(cW / vW, cH / vH);
@@ -172,17 +239,18 @@ async function runFaceEmotionInference() {
       const b = det.detection.box;
 
       // Coordinate mapping
-      let sx = b.x * scale + offsetX;
-      let sy = b.y * scale + offsetY;
-      let sw = b.width * scale;
-      let sh = b.height * scale;
+      let sx, sy, sw, sh;
+      sw = b.width * scale;
+      sh = b.height * scale;
+      sy = b.y * scale + offsetY;
 
-      // Mirror transform for selfie camera
+      // Mirror transform calculation for front camera
       if (currentFacingMode === 'user') {
-        sx = cW - (sx + sw);
+        sx = cW - (b.x * scale + offsetX + sw);
+      } else {
+        sx = b.x * scale + offsetX;
       }
 
-      // Extract raw expressions from neural network
       const expr = det.expressions;
 
       // Compute Contempt from 68 landmarks (mouth corner asymmetry)
@@ -239,7 +307,6 @@ async function runFaceEmotionInference() {
 // ==========================================
 // 4. Non-Overlapping Layout Calculator
 // ==========================================
-// Finds a location for the meter panel that does NOT overlap faces or other panels
 function calculateNonOverlappingPanel(box, panelW, panelH, cW, cH, occupiedRects) {
   const gap = 8;
   const candidates = [
@@ -254,7 +321,6 @@ function calculateNonOverlappingPanel(box, panelW, panelH, cW, cH, occupiedRects
   ];
 
   for (const cand of candidates) {
-    // Clamp inside viewport
     const x = Math.max(gap, Math.min(cW - panelW - gap, cand.x));
     const y = Math.max(16, Math.min(cH - panelH - 75, cand.y));
     const rect = { x, y, w: panelW, h: panelH };
@@ -274,7 +340,7 @@ function calculateNonOverlappingPanel(box, panelW, panelH, cW, cH, occupiedRects
     }
   }
 
-  // Fallback: stacked right or left with vertical offset
+  // Fallback
   let fallbackX = (box.x + box.w + panelW + gap < cW) ? box.x + box.w + gap : Math.max(gap, box.x - panelW - gap);
   let fallbackY = Math.max(16, Math.min(cH - panelH - 75, box.y));
   const fallbackRect = { x: fallbackX, y: fallbackY, w: panelW, h: panelH };
@@ -283,33 +349,26 @@ function calculateNonOverlappingPanel(box, panelW, panelH, cW, cH, occupiedRects
 }
 
 // ==========================================
-// 5. Main Render Loop
+// 5. Main Single Animation Render Loop
 // ==========================================
 function mainRenderLoop() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  if (video.readyState >= 2) {
+  if (video.readyState >= 2 && !video.paused && video.videoWidth > 10 && !isSwitchingCamera) {
     runFaceEmotionInference();
 
     const cW = canvas.width;
     const cH = canvas.height;
 
-    // ========================================================
-    // REQUIREMENT 1 & 2:
-    // If NO face is detected -> All values strictly 0%
-    // If face IS detected -> Real measured values shown
-    // ========================================================
+    // Zero-face vs Confirmed face display
     if (detectedFacesData.length === 0) {
       statusDot.classList.remove('active');
       statusText.textContent = 'Scanning: No Face Detected';
-
-      // Draw zeroed-out meter HUD in top corner
       drawZeroedMetersHUD(ctx, cW, cH);
     } else {
       statusDot.classList.add('active');
       statusText.textContent = `Face Confirmed (${detectedFacesData.length} Detected)`;
 
-      // Occupied rectangles registry for collision avoidance
       const occupiedRects = detectedFacesData.map(f => ({
         x: f.box.x - 4,
         y: f.box.y - 4,
@@ -317,20 +376,23 @@ function mainRenderLoop() {
         h: f.box.h + 8
       }));
 
-      // Render each face and its non-overlapping meter
       detectedFacesData.forEach((faceData, idx) => {
         drawFaceAndNonOverlappingMeter(ctx, faceData, idx + 1, cW, cH, occupiedRects);
       });
+    }
+  } else {
+    if (isSwitchingCamera) {
+      statusDot.classList.remove('active');
+      statusText.textContent = 'Switching Camera...';
     }
   }
 
   requestAnimationFrame(mainRenderLoop);
 }
 
-// ========================================================
-// Render 1: ZEROED METERS HUD (When NO Face Detected)
-// Strictly shows 0% for all 8 emotions
-// ========================================================
+// ==========================================
+// Render 1: ZEROED METERS HUD (No Face)
+// ==========================================
 function drawZeroedMetersHUD(targetCtx, cW, cH) {
   targetCtx.save();
 
@@ -339,7 +401,6 @@ function drawZeroedMetersHUD(targetCtx, cW, cH) {
   const panelX = Math.max(12, cW - panelW - 12);
   const panelY = 70;
 
-  // Solid dark background for legibility
   targetCtx.fillStyle = 'rgba(8, 12, 20, 0.92)';
   targetCtx.strokeStyle = 'rgba(255, 71, 87, 0.4)';
   targetCtx.lineWidth = 1;
@@ -363,7 +424,6 @@ function drawZeroedMetersHUD(targetCtx, cW, cH) {
     targetCtx.fillText('0%', panelX + panelW - 8, itemY);
     targetCtx.textAlign = 'left';
 
-    // Empty bar track
     targetCtx.fillStyle = 'rgba(255, 255, 255, 0.08)';
     targetCtx.fillRect(panelX + 34, itemY - 6, 44, 3);
 
@@ -373,9 +433,9 @@ function drawZeroedMetersHUD(targetCtx, cW, cH) {
   targetCtx.restore();
 }
 
-// ========================================================
-// Render 2: DETECTED FACE + NON-OVERLAPPING LIVE METER
-// ========================================================
+// ==========================================
+// Render 2: DETECTED FACE + NON-OVERLAPPING METER
+// ==========================================
 function drawFaceAndNonOverlappingMeter(targetCtx, faceData, faceNum, cW, cH, occupiedRects) {
   const box = faceData.box;
   const scores = faceData.scores;
@@ -387,7 +447,7 @@ function drawFaceAndNonOverlappingMeter(targetCtx, faceData, faceNum, cW, cH, oc
 
   targetCtx.save();
 
-  // 1. Draw Sleek Tech Reticle around Confirmed Face
+  // 1. Sleek Reticle around Confirmed Face
   targetCtx.strokeStyle = dominant.color;
   targetCtx.lineWidth = 2;
   targetCtx.shadowColor = dominant.color;
@@ -396,7 +456,7 @@ function drawFaceAndNonOverlappingMeter(targetCtx, faceData, faceNum, cW, cH, oc
   const corner = Math.min(box.w, box.h) * 0.2;
   targetCtx.beginPath();
   targetCtx.moveTo(box.x, box.y + corner); targetCtx.lineTo(box.x, box.y); targetCtx.lineTo(box.x + corner, box.y);
-  targetCtx.moveTo(box.x + box.w - corner, box.y); targetCtx.lineTo(box.x + box.w, box.y); targetCtx.lineTo(box.x + box.w, box.y + corner);
+  targetCtx.moveTo(box.x + box.w - corner, box.y); targetCtx.lineTo(box.x + box.w); targetCtx.lineTo(box.x + box.w, box.y + corner);
   targetCtx.moveTo(box.x + box.w, box.y + box.h - corner); targetCtx.lineTo(box.x + box.w, box.y + box.h); targetCtx.lineTo(box.x + box.w - corner, box.y + box.h);
   targetCtx.moveTo(box.x + corner, box.y + box.h); targetCtx.lineTo(box.x, box.y + box.h); targetCtx.lineTo(box.x, box.y + box.h - corner);
   targetCtx.stroke();
@@ -411,12 +471,11 @@ function drawFaceAndNonOverlappingMeter(targetCtx, faceData, faceNum, cW, cH, oc
   targetCtx.fillStyle = '#000000';
   targetCtx.fillText(tagText, box.x + 6, box.y - 6);
 
-  // 2. Calculate Non-Overlapping Position for Smaller Live Meter Panel
+  // 2. Non-Overlapping Position for Smaller Live Meter
   const panelW = 114;
   const panelH = EMOTIONS.length * 15 + 22;
   const panelPos = calculateNonOverlappingPanel(box, panelW, panelH, cW, cH, occupiedRects);
 
-  // High-contrast, semi-transparent dark card
   targetCtx.fillStyle = 'rgba(8, 12, 20, 0.92)';
   targetCtx.strokeStyle = 'rgba(0, 255, 196, 0.4)';
   targetCtx.lineWidth = 1;
@@ -425,13 +484,11 @@ function drawFaceAndNonOverlappingMeter(targetCtx, faceData, faceNum, cW, cH, oc
   targetCtx.fill();
   targetCtx.stroke();
 
-  // Panel Title
   targetCtx.fillStyle = '#00ffc4';
   targetCtx.font = 'bold 9px -apple-system, sans-serif';
   targetCtx.textAlign = 'left';
   targetCtx.fillText(`FACE #${faceNum} METERS`, panelPos.x + 8, panelPos.y + 13);
 
-  // Render 8 Values for this face
   let itemY = panelPos.y + 26;
   EMOTIONS.forEach((emo, i) => {
     const val = scores[i] || 0;
@@ -442,13 +499,11 @@ function drawFaceAndNonOverlappingMeter(targetCtx, faceData, faceNum, cW, cH, oc
     targetCtx.fillStyle = isLead ? '#FFFFFF' : '#A0AEC0';
     targetCtx.fillText(emo.name.slice(0, 3).toUpperCase(), panelPos.x + 8, itemY);
 
-    // Percentage value
     targetCtx.fillStyle = emo.color;
     targetCtx.textAlign = 'right';
     targetCtx.fillText(`${pct}%`, panelPos.x + panelW - 8, itemY);
     targetCtx.textAlign = 'left';
 
-    // Track
     const barX = panelPos.x + 34;
     const barY = itemY - 6;
     const barW = 44;
@@ -457,7 +512,6 @@ function drawFaceAndNonOverlappingMeter(targetCtx, faceData, faceNum, cW, cH, oc
     targetCtx.fillStyle = 'rgba(255, 255, 255, 0.12)';
     targetCtx.fillRect(barX, barY, barW, barH);
 
-    // Filled bar
     targetCtx.fillStyle = emo.color;
     targetCtx.fillRect(barX, barY, barW * Math.min(1.0, val), barH);
 
@@ -471,7 +525,7 @@ function drawFaceAndNonOverlappingMeter(targetCtx, faceData, faceNum, cW, cH, oc
 // 6. Photo & Video Capture
 // ==========================================
 photoBtn.addEventListener('click', () => {
-  if (video.readyState < 2) return;
+  if (video.readyState < 2 || video.videoWidth < 10) return;
 
   photoBtn.style.transform = 'scale(0.85)';
   setTimeout(() => { photoBtn.style.transform = 'scale(1)'; }, 150);
@@ -537,7 +591,7 @@ recordBtn.addEventListener('click', () => {
 });
 
 function startVideoRecording() {
-  if (video.readyState < 2) return;
+  if (video.readyState < 2 || video.videoWidth < 10) return;
 
   recordedChunks = [];
   const recCanvas = document.createElement('canvas');
@@ -624,6 +678,7 @@ function stopVideoRecording() {
   recordBtn.classList.remove('recording');
 }
 
-// Start loading neural models and camera feed
+// Start loading neural models, initialize single animation loop, and start camera
 loadNeuralModels();
 startCamera();
+requestAnimationFrame(mainRenderLoop);

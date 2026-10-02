@@ -1,30 +1,29 @@
-# 8-Emotion Detection HUD (v6 - Front Camera Switch Fix & Stable Inference)
+# 8-Emotion Detection HUD (v7 - Guaranteed Floating Meter Popup)
 
-This release resolves the issue where face detection halted when switching between front and rear cameras on mobile devices.
+This release fixes the issue where floating emotion meter panels failed to pop up next to detected faces.
 
-## What Was Fixed in v6
+## What Was Fixed in v7
 
-1. **Front/Rear Camera Switching Fix**:
-   - **Hardware Lock Release**: Android requires a brief cooldown period (250ms) to release the camera hardware before another camera lens (front/rear) can be initialized.
-   - **Duplicate Render Loop Prevention**: Previously, reinitializing the camera spawned concurrent render loops that collided and locked the detection state. The render loop is now strictly governed by a single master animation loop.
-   - **Video Playback & Dimension Watchdog**: Detects when video stream tracks transition, safely re-binds playback, and ensures video dimensions are non-zero before inference runs.
-   - **Mirror Transform Alignment**: Properly calculates mirrored screen coordinates on the front selfie camera while preserving standard orientation on the rear camera.
+1. **Guaranteed Floating Meter Pop-Up**:
+   - Replaced browser-dependent `ctx.roundRect` with universal quadratic-curve canvas rendering. In previous versions, canvas engines without native `roundRect` threw a runtime `TypeError`, silently aborting the meter drawing sequence after drawing the face reticle.
+   - Pinned the floating meter directly beside each detected face with a dashed tech pointer line visually anchoring the meter card to the face.
 
-2. **Accurate Neural Network Engine**:
-   - Powered by `@vladmandic/face-api` (TinyFaceDetector, FaceExpressionNet, and 68-Point FaceLandmarks).
-   - Real, authentic emotional responses across the 8-emotion taxonomy (*Anger, Contempt, Disgust, Fear, Happiness, Neutral, Sadness, Surprise*).
+2. **Smart Mobile Placement Without Disappearing**:
+   - Evaluates horizontal screen real estate on both sides of the face (Right vs Left).
+   - If the face is wide, it anchors to the roomier side and clamps cleanly within the viewport.
+   - Never skips rendering or pushes meters off-screen.
 
-3. **Strict Zeroing When No Face Detected**:
-   - When 0 faces are in view (or camera is covered):
+3. **Resilient Neural Inference**:
+   - Decoupled landmark tracking from emotion expression scoring.
+   - Even if landmark downloads take time or fluctuate, the 8-emotion neural network inference runs smoothly.
+
+4. **Strict Zeroing When No Face Detected**:
+   - If no face is in view (or camera is covered):
      - All 8 emotion meters strictly show **0%**.
      - Top status badge turns red: **"Scanning: No Face Detected"**.
-     - No face bounding boxes are drawn.
-   - As soon as a face enters the frame, the status badge turns bright green (**"Face Confirmed"**) and meters immediately report live values.
+     - Bounding reticles and floating meters disappear.
+   - As soon as a face enters the frame, the status badge turns bright green (**"Face Confirmed"**) and the floating meter immediately pops up.
 
-4. **Compact, Anti-Collision Meters**:
-   - Pinned beside each detected face with a compact width of 114px.
-   - Spatial collision detector prevents overlapping between faces and meters.
-
-5. **Photo & Video Capture**:
-   - White shutter button: Saves high-res photo with live meters.
-   - Red record button: Records video of camera stream with live HUD meters.
+5. **Front & Rear Camera Switching with Selfie Mirroring**:
+   - Clean hardware release prevents freezing when toggling cameras.
+   - Front selfie camera is mirrored accurately; rear camera remains in natural orientation.

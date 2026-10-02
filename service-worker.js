@@ -1,4 +1,4 @@
-const CACHE_NAME = 'emotion-hud-v6';
+const CACHE_NAME = 'emotion-hud-v7';
 const STATIC_ASSETS = [
   './',
   './index.html',

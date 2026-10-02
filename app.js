@@ -49,6 +49,21 @@ function showToast(msg) {
   setTimeout(() => { toast.style.display = 'none'; }, 2200);
 }
 
+// Universal Canvas Rounded Rectangle Helper (Fail-safe on all browsers)
+function drawCardRoundRect(targetCtx, x, y, w, h, r) {
+  targetCtx.beginPath();
+  targetCtx.moveTo(x + r, y);
+  targetCtx.lineTo(x + w - r, y);
+  targetCtx.quadraticCurveTo(x + w, y, x + w, y + r);
+  targetCtx.lineTo(x + w, y + h - r);
+  targetCtx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  targetCtx.lineTo(x + r, y + h);
+  targetCtx.quadraticCurveTo(x, y + h, x, y + h - r);
+  targetCtx.lineTo(x, y + r);
+  targetCtx.quadraticCurveTo(x, y, x + r, y);
+  targetCtx.closePath();
+}
+
 // ==========================================
 // 1. Neural Network Model Loading (face-api)
 // ==========================================
@@ -65,8 +80,8 @@ async function loadNeuralModels() {
       console.log('Loading face-api models from:', baseUrl);
       await Promise.all([
         faceapi.nets.tinyFaceDetector.loadFromUri(baseUrl),
-        faceapi.nets.faceLandmark68Net.loadFromUri(baseUrl),
-        faceapi.nets.faceExpressionNet.loadFromUri(baseUrl)
+        faceapi.nets.faceExpressionNet.loadFromUri(baseUrl),
+        faceapi.nets.faceLandmark68Net.loadFromUri(baseUrl).catch(e => console.warn('Landmark optional fallback:', e))
       ]);
       isModelsLoaded = true;
       statusText.textContent = 'Scanning: No Face Detected';
@@ -97,7 +112,7 @@ async function startCamera() {
   try {
     activeStream = await navigator.mediaDevices.getUserMedia(constraints);
   } catch (err) {
-    console.warn('Initial camera constraint failed, retrying simple constraint...', err);
+    console.warn('High-res camera constraint failed, retrying simple constraint...', err);
     try {
       activeStream = await navigator.mediaDevices.getUserMedia({
         audio: false,
@@ -120,7 +135,6 @@ async function startCamera() {
     video.classList.add('rear-mode');
   }
 
-  // Await playback explicitly
   try {
     await video.play();
   } catch (playErr) {
@@ -131,18 +145,15 @@ async function startCamera() {
   showToast('Camera active: ' + (currentFacingMode === 'user' ? 'Front (Selfie)' : 'Rear'));
 }
 
-// Bulletproof Front/Rear Camera Switching
 async function switchCamera() {
   if (isSwitchingCamera) return;
   isSwitchingCamera = true;
   flipCamBtn.disabled = true;
 
-  // 1. Reset state and release detection lock
   isDetecting = false;
   detectedFacesData = [];
   faceSmoother.clear();
 
-  // 2. Stop existing tracks cleanly
   if (activeStream) {
     activeStream.getTracks().forEach(track => {
       try { track.stop(); } catch (e) {}
@@ -151,15 +162,11 @@ async function switchCamera() {
   }
   video.srcObject = null;
 
-  // 3. Toggle facing mode
   currentFacingMode = (currentFacingMode === 'user') ? 'environment' : 'user';
   statusText.textContent = 'Switching Camera...';
   statusDot.classList.remove('active');
 
-  // 4. CRITICAL: Wait 250ms for Android Camera HAL to cleanly release hardware
   await new Promise(resolve => setTimeout(resolve, 250));
-
-  // 5. Start new camera
   await startCamera();
 
   isSwitchingCamera = false;
@@ -174,6 +181,9 @@ function resizeCanvas() {
   canvas.height = window.innerHeight;
 }
 window.addEventListener('resize', resizeCanvas);
+window.addEventListener('orientationchange', () => {
+  setTimeout(resizeCanvas, 200);
+});
 
 // ==========================================
 // 3. Autonomous Multi-Face Emotion Inference
@@ -182,20 +192,16 @@ let detectedFacesData = [];
 const faceSmoother = new Map();
 
 async function runFaceEmotionInference() {
-  // Pre-condition guards: must have model, active video frame, and no stuck lock
   if (!isModelsLoaded || !video || video.paused || video.ended || video.readyState < 2 || isSwitchingCamera) {
     return;
   }
 
-  // Ensure video dimensions are valid
   if (!video.videoWidth || !video.videoHeight || video.videoWidth < 10) {
     return;
   }
 
-  // Watchdog timer: if previous detection is taking > 1200ms, unlock it
   if (isDetecting) {
     if (Date.now() - lastInferenceTime > 1200) {
-      console.warn('Watchdog: resetting stuck detection lock');
       isDetecting = false;
     } else {
       return;
@@ -206,13 +212,27 @@ async function runFaceEmotionInference() {
   lastInferenceTime = Date.now();
 
   try {
-    const options = new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.35 });
-    const detections = await faceapi
-      .detectAllFaces(video, options)
-      .withFaceLandmarks()
-      .withFaceExpressions();
+    const options = new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.3 });
+    
+    // Robust detection query: uses landmarks if loaded, falls back to pure expressions
+    let detections = [];
+    if (faceapi.nets.faceLandmark68Net && faceapi.nets.faceLandmark68Net.isLoaded) {
+      try {
+        detections = await faceapi
+          .detectAllFaces(video, options)
+          .withFaceLandmarks()
+          .withFaceExpressions();
+      } catch (landmarkErr) {
+        detections = await faceapi
+          .detectAllFaces(video, options)
+          .withFaceExpressions();
+      }
+    } else {
+      detections = await faceapi
+        .detectAllFaces(video, options)
+        .withFaceExpressions();
+    }
 
-    // Check if camera switch started while detecting
     if (isSwitchingCamera || !video.srcObject) {
       isDetecting = false;
       return;
@@ -238,13 +258,12 @@ async function runFaceEmotionInference() {
     detections.forEach((det, idx) => {
       const b = det.detection.box;
 
-      // Coordinate mapping
-      let sx, sy, sw, sh;
-      sw = b.width * scale;
-      sh = b.height * scale;
-      sy = b.y * scale + offsetY;
+      let sw = b.width * scale;
+      let sh = b.height * scale;
+      let sy = b.y * scale + offsetY;
+      let sx;
 
-      // Mirror transform calculation for front camera
+      // Coordinate mapping with mirror support
       if (currentFacingMode === 'user') {
         sx = cW - (b.x * scale + offsetX + sw);
       } else {
@@ -253,12 +272,12 @@ async function runFaceEmotionInference() {
 
       const expr = det.expressions;
 
-      // Compute Contempt from 68 landmarks (mouth corner asymmetry)
+      // Compute Contempt if landmarks available
       let contempt = 0.01;
       if (det.landmarks && det.landmarks.positions) {
         const pts = det.landmarks.positions;
-        const mouthL = pts[48]; // left mouth corner
-        const mouthR = pts[54]; // right mouth corner
+        const mouthL = pts[48];
+        const mouthR = pts[54];
         const asym = Math.abs(mouthL.y - mouthR.y) / (b.height || 1);
         if (asym > 0.038 && expr.happy < 0.55) {
           contempt = Math.min(0.85, asym * 5.0);
@@ -277,7 +296,7 @@ async function runFaceEmotionInference() {
         expr.surprised || 0
       ];
 
-      // Smooth scores across frames for stability
+      // Smooth scores across frames
       const faceKey = 'face_' + idx;
       let prev = faceSmoother.get(faceKey);
       if (!prev) {
@@ -285,7 +304,7 @@ async function runFaceEmotionInference() {
         faceSmoother.set(faceKey, prev);
       } else {
         for (let i = 0; i < rawScores.length; i++) {
-          prev[i] = prev[i] * 0.6 + rawScores[i] * 0.4;
+          prev[i] = prev[i] * 0.55 + rawScores[i] * 0.45;
         }
       }
 
@@ -305,51 +324,36 @@ async function runFaceEmotionInference() {
 }
 
 // ==========================================
-// 4. Non-Overlapping Layout Calculator
+// 4. Guaranteed Non-Overlapping Placement
 // ==========================================
-function calculateNonOverlappingPanel(box, panelW, panelH, cW, cH, occupiedRects) {
-  const gap = 8;
-  const candidates = [
-    // 1. Right side of face
-    { x: box.x + box.w + gap, y: box.y },
-    // 2. Left side of face
-    { x: box.x - panelW - gap, y: box.y },
-    // 3. Below face
-    { x: Math.max(gap, box.x + (box.w - panelW) / 2), y: box.y + box.h + gap },
-    // 4. Above face
-    { x: Math.max(gap, box.x + (box.w - panelW) / 2), y: box.y - panelH - gap }
-  ];
+function getFloatingPanelPosition(box, panelW, panelH, cW, cH) {
+  const gap = 10;
+  let x, y;
 
-  for (const cand of candidates) {
-    const x = Math.max(gap, Math.min(cW - panelW - gap, cand.x));
-    const y = Math.max(16, Math.min(cH - panelH - 75, cand.y));
-    const rect = { x, y, w: panelW, h: panelH };
+  const spaceRight = cW - (box.x + box.w);
+  const spaceLeft = box.x;
 
-    let collides = false;
-    for (const occ of occupiedRects) {
-      if (!(rect.x + rect.w < occ.x || rect.x > occ.x + occ.w ||
-            rect.y + rect.h < occ.y || rect.y > occ.y + occ.h)) {
-        collides = true;
-        break;
-      }
-    }
-
-    if (!collides) {
-      occupiedRects.push(rect);
-      return rect;
+  if (spaceRight >= panelW + gap) {
+    x = box.x + box.w + gap;
+  } else if (spaceLeft >= panelW + gap) {
+    x = box.x - panelW - gap;
+  } else {
+    // Face occupies majority of screen width: place on the roomier side
+    if (spaceRight >= spaceLeft) {
+      x = Math.max(gap, cW - panelW - gap);
+    } else {
+      x = gap;
     }
   }
 
-  // Fallback
-  let fallbackX = (box.x + box.w + panelW + gap < cW) ? box.x + box.w + gap : Math.max(gap, box.x - panelW - gap);
-  let fallbackY = Math.max(16, Math.min(cH - panelH - 75, box.y));
-  const fallbackRect = { x: fallbackX, y: fallbackY, w: panelW, h: panelH };
-  occupiedRects.push(fallbackRect);
-  return fallbackRect;
+  // Anchor vertically with the face, clamped to stay safely inside screen
+  y = Math.max(65, Math.min(cH - panelH - 85, box.y));
+
+  return { x, y, w: panelW, h: panelH };
 }
 
 // ==========================================
-// 5. Main Single Animation Render Loop
+// 5. Main Render Loop
 // ==========================================
 function mainRenderLoop() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -360,7 +364,6 @@ function mainRenderLoop() {
     const cW = canvas.width;
     const cH = canvas.height;
 
-    // Zero-face vs Confirmed face display
     if (detectedFacesData.length === 0) {
       statusDot.classList.remove('active');
       statusText.textContent = 'Scanning: No Face Detected';
@@ -369,15 +372,8 @@ function mainRenderLoop() {
       statusDot.classList.add('active');
       statusText.textContent = `Face Confirmed (${detectedFacesData.length} Detected)`;
 
-      const occupiedRects = detectedFacesData.map(f => ({
-        x: f.box.x - 4,
-        y: f.box.y - 4,
-        w: f.box.w + 8,
-        h: f.box.h + 8
-      }));
-
       detectedFacesData.forEach((faceData, idx) => {
-        drawFaceAndNonOverlappingMeter(ctx, faceData, idx + 1, cW, cH, occupiedRects);
+        drawFaceAndFloatingMeter(ctx, faceData, idx + 1, cW, cH);
       });
     }
   } else {
@@ -397,24 +393,23 @@ function drawZeroedMetersHUD(targetCtx, cW, cH) {
   targetCtx.save();
 
   const panelW = 114;
-  const panelH = EMOTIONS.length * 15 + 22;
+  const panelH = EMOTIONS.length * 15 + 24;
   const panelX = Math.max(12, cW - panelW - 12);
   const panelY = 70;
 
   targetCtx.fillStyle = 'rgba(8, 12, 20, 0.92)';
   targetCtx.strokeStyle = 'rgba(255, 71, 87, 0.4)';
   targetCtx.lineWidth = 1;
-  targetCtx.beginPath();
-  targetCtx.roundRect(panelX, panelY, panelW, panelH, 8);
+  drawCardRoundRect(targetCtx, panelX, panelY, panelW, panelH, 8);
   targetCtx.fill();
   targetCtx.stroke();
 
   targetCtx.textAlign = 'left';
   targetCtx.fillStyle = '#ff4757';
   targetCtx.font = 'bold 9px -apple-system, sans-serif';
-  targetCtx.fillText('NO FACE (0%)', panelX + 8, panelY + 13);
+  targetCtx.fillText('NO FACE (0%)', panelX + 8, panelY + 14);
 
-  let itemY = panelY + 26;
+  let itemY = panelY + 28;
   EMOTIONS.forEach(emo => {
     targetCtx.font = '9px monospace';
     targetCtx.fillStyle = '#718096';
@@ -425,7 +420,7 @@ function drawZeroedMetersHUD(targetCtx, cW, cH) {
     targetCtx.textAlign = 'left';
 
     targetCtx.fillStyle = 'rgba(255, 255, 255, 0.08)';
-    targetCtx.fillRect(panelX + 34, itemY - 6, 44, 3);
+    targetCtx.fillRect(panelX + 34, itemY - 6, 44, 3.5);
 
     itemY += 15;
   });
@@ -434,9 +429,9 @@ function drawZeroedMetersHUD(targetCtx, cW, cH) {
 }
 
 // ==========================================
-// Render 2: DETECTED FACE + NON-OVERLAPPING METER
+// Render 2: DETECTED FACE + FLOATING LIVE METER
 // ==========================================
-function drawFaceAndNonOverlappingMeter(targetCtx, faceData, faceNum, cW, cH, occupiedRects) {
+function drawFaceAndFloatingMeter(targetCtx, faceData, faceNum, cW, cH) {
   const box = faceData.box;
   const scores = faceData.scores;
 
@@ -449,14 +444,14 @@ function drawFaceAndNonOverlappingMeter(targetCtx, faceData, faceNum, cW, cH, oc
 
   // 1. Sleek Reticle around Confirmed Face
   targetCtx.strokeStyle = dominant.color;
-  targetCtx.lineWidth = 2;
+  targetCtx.lineWidth = 2.5;
   targetCtx.shadowColor = dominant.color;
   targetCtx.shadowBlur = 8;
 
   const corner = Math.min(box.w, box.h) * 0.2;
   targetCtx.beginPath();
   targetCtx.moveTo(box.x, box.y + corner); targetCtx.lineTo(box.x, box.y); targetCtx.lineTo(box.x + corner, box.y);
-  targetCtx.moveTo(box.x + box.w - corner, box.y); targetCtx.lineTo(box.x + box.w); targetCtx.lineTo(box.x + box.w, box.y + corner);
+  targetCtx.moveTo(box.x + box.w - corner, box.y); targetCtx.lineTo(box.x + box.w, box.y); targetCtx.lineTo(box.x + box.w, box.y + corner);
   targetCtx.moveTo(box.x + box.w, box.y + box.h - corner); targetCtx.lineTo(box.x + box.w, box.y + box.h); targetCtx.lineTo(box.x + box.w - corner, box.y + box.h);
   targetCtx.moveTo(box.x + corner, box.y + box.h); targetCtx.lineTo(box.x, box.y + box.h); targetCtx.lineTo(box.x, box.y + box.h - corner);
   targetCtx.stroke();
@@ -471,25 +466,42 @@ function drawFaceAndNonOverlappingMeter(targetCtx, faceData, faceNum, cW, cH, oc
   targetCtx.fillStyle = '#000000';
   targetCtx.fillText(tagText, box.x + 6, box.y - 6);
 
-  // 2. Non-Overlapping Position for Smaller Live Meter
+  // 2. Guaranteed Floating Meter Position
   const panelW = 114;
-  const panelH = EMOTIONS.length * 15 + 22;
-  const panelPos = calculateNonOverlappingPanel(box, panelW, panelH, cW, cH, occupiedRects);
+  const panelH = EMOTIONS.length * 15 + 24;
+  const panelPos = getFloatingPanelPosition(box, panelW, panelH, cW, cH);
 
-  targetCtx.fillStyle = 'rgba(8, 12, 20, 0.92)';
-  targetCtx.strokeStyle = 'rgba(0, 255, 196, 0.4)';
-  targetCtx.lineWidth = 1;
+  // Dashed Tech Pointer Line from Face Box to Floating Meter
+  targetCtx.strokeStyle = 'rgba(0, 255, 196, 0.5)';
+  targetCtx.lineWidth = 1.5;
+  targetCtx.setLineDash([3, 3]);
   targetCtx.beginPath();
-  targetCtx.roundRect(panelPos.x, panelPos.y, panelW, panelH, 8);
+  if (panelPos.x > box.x) {
+    targetCtx.moveTo(box.x + box.w, box.y + 24);
+    targetCtx.lineTo(panelPos.x, box.y + 24);
+  } else {
+    targetCtx.moveTo(box.x, box.y + 24);
+    targetCtx.lineTo(panelPos.x + panelW, box.y + 24);
+  }
+  targetCtx.stroke();
+  targetCtx.setLineDash([]);
+
+  // Floating Meter Card Background
+  targetCtx.fillStyle = 'rgba(8, 12, 20, 0.94)';
+  targetCtx.strokeStyle = 'rgba(0, 255, 196, 0.55)';
+  targetCtx.lineWidth = 1.2;
+  drawCardRoundRect(targetCtx, panelPos.x, panelPos.y, panelW, panelH, 8);
   targetCtx.fill();
   targetCtx.stroke();
 
+  // Panel Title Header
   targetCtx.fillStyle = '#00ffc4';
   targetCtx.font = 'bold 9px -apple-system, sans-serif';
   targetCtx.textAlign = 'left';
-  targetCtx.fillText(`FACE #${faceNum} METERS`, panelPos.x + 8, panelPos.y + 13);
+  targetCtx.fillText(`FACE #${faceNum} METERS`, panelPos.x + 8, panelPos.y + 14);
 
-  let itemY = panelPos.y + 26;
+  // Render 8 Values for this face
+  let itemY = panelPos.y + 28;
   EMOTIONS.forEach((emo, i) => {
     const val = scores[i] || 0;
     const pct = Math.min(100, Math.round(val * 100));
@@ -546,11 +558,8 @@ photoBtn.addEventListener('click', () => {
   if (detectedFacesData.length === 0) {
     drawZeroedMetersHUD(snapCtx, snapCanvas.width, snapCanvas.height);
   } else {
-    const occupiedRects = detectedFacesData.map(f => ({
-      x: f.box.x - 4, y: f.box.y - 4, w: f.box.w + 8, h: f.box.h + 8
-    }));
     detectedFacesData.forEach((f, idx) => {
-      drawFaceAndNonOverlappingMeter(snapCtx, f, idx + 1, snapCanvas.width, snapCanvas.height, occupiedRects);
+      drawFaceAndFloatingMeter(snapCtx, f, idx + 1, snapCanvas.width, snapCanvas.height);
     });
   }
 
@@ -617,11 +626,8 @@ function startVideoRecording() {
     if (detectedFacesData.length === 0) {
       drawZeroedMetersHUD(recCtx, recCanvas.width, recCanvas.height);
     } else {
-      const occupiedRects = detectedFacesData.map(f => ({
-        x: f.box.x - 4, y: f.box.y - 4, w: f.box.w + 8, h: f.box.h + 8
-      }));
       detectedFacesData.forEach((f, idx) => {
-        drawFaceAndNonOverlappingMeter(recCtx, f, idx + 1, recCanvas.width, recCanvas.height, occupiedRects);
+        drawFaceAndFloatingMeter(recCtx, f, idx + 1, recCanvas.width, recCanvas.height);
       });
     }
     requestAnimationFrame(updateRecFrame);

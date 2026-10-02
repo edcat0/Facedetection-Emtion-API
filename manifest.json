@@ -3,7 +3,7 @@
   "name": "Emotion Detection HUD",
   "short_name": "EmotionHUD",
   "id": "emotion-detection-hud",
-  "description": "Multi-face real-time 8-emotion AI camera with front/rear camera switching and HUD meters.",
+  "description": "Real-time 8-emotion facial analysis camera with guaranteed floating HUD meters.",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
@@ -32,7 +32,7 @@
       "sizes": "720x1280",
       "type": "image/png",
       "form_factor": "narrow",
-      "label": "Front and Rear Camera Emotion HUD"
+      "label": "Live Emotion Floating HUD Meters"
     }
   ]
 }

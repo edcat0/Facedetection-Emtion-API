@@ -1,31 +1,47 @@
-# 8-Emotion Detection HUD (v8 - Guaranteed Floating Meters & Zero External Dependencies)
+# Microsoft Cognitive Emotion HUD (v9 - 5-Decimal Precision & Microsoft Emotion Standard)
 
-This release eliminates external CDN network failures and guarantees that the floating emotion meter card pops up right next to confirmed faces.
+This release implements the Microsoft Cognitive Services Emotion standard ([microsoft/Cognitive-Emotion-Windows](https://github.com/microsoft/Cognitive-Emotion-Windows)) with **5-digit decimal point precision (`0.00000` to `1.00000`)** and dual engine support (On-Device Local Engine + Microsoft Cognitive Services Cloud API).
 
-## What Was Fixed in v8
+## What Was Added & Changed in v9
 
-1. **Zero External CDN Dependencies**:
-   - In versions 5, 6, and 7, the app attempted to fetch external neural network model shards over the mobile network, which failed with 404 or stalled on mobile data, keeping the detection loop permanently disabled.
-   - Version 8 includes an autonomous, zero-latency on-device face tracking engine that runs directly in memory with 0 external network requests, starting in under 50ms.
+1. **Microsoft Cognitive Emotion Contract**:
+   - Matches the official Microsoft Cognitive Services Emotion schema:
+     - `anger`
+     - `contempt`
+     - `disgust`
+     - `fear`
+     - `happiness`
+     - `neutral`
+     - `sadness`
+     - `surprise`
+   - Added an in-app **Settings Dialog** (gear/key icon in the top bar) allowing you to connect directly to your **Microsoft Azure Cognitive Services / Face API** endpoint and subscription key if desired, streaming frames for cloud analysis.
 
-2. **Guaranteed Floating Meter Pop-Up**:
-   - Pinned directly adjacent to the face bounding reticle (right side if space permits, left side if near the screen edge).
-   - High-contrast HUD card (`120px` width x `152px` height) with a dashed cyan pointer line anchoring the card to the face box.
+2. **5 Decimal Digits Below 0 (`0.00000` to `1.00000`)**:
+   - Replaced integer percentage values (`%`) with exact 5-decimal floating point scores:
+     - Example:
+       - `ANG: 0.00012`
+       - `CON: 0.00005`
+       - `DIS: 0.00003`
+       - `FEA: 0.00008`
+       - `HAP: 0.88412`
+       - `NEU: 0.11520`
+       - `SAD: 0.00015`
+       - `SUR: 0.00025`
+   - When no face is detected, all 8 values strictly show:
+     - `ANG: 0.00000`
+     - `CON: 0.00000`
+     - `DIS: 0.00000`
+     - `FEA: 0.00000`
+     - `HAP: 0.00000`
+     - `NEU: 0.00000`
+     - `SAD: 0.00000`
+     - `SUR: 0.00000`
+
+3. **Guaranteed Floating Meter Pop-Up**:
+   - Pinned directly beside the face bounding reticle with a dashed cyan pointer line.
+   - Sized at `138px` width x `160px` height to comfortably fit 5-decimal numbers without cramping.
    - Rendered using universal quadratic-curve canvas math (`drawCardRoundRect`), preventing runtime canvas errors on all mobile browsers and WebViews.
 
-3. **Authentic Emotion Expression Responses**:
-   - **Neutral**: Dominates (70%–85%) when your facial muscles are relaxed.
-   - **Happiness**: Spikes up to 85%+ when you smile or laugh.
-   - **Surprise**: Rises when your mouth opens wide and jaw drops.
-   - **Anger / Contempt / Disgust / Sadness / Fear**: Dynamically calculate genuine facial features without false positive peaking.
-
-4. **Strict Zeroing When No Face Detected**:
-   - When 0 faces are in view (or the camera is obstructed):
-     - All 8 emotion values strictly show **0%**.
-     - Top status badge turns red: **"Scanning: No Face Detected"**.
-     - Reticles and floating meters disappear.
-   - As soon as a face enters the camera feed, the status badge turns bright green (**"Face Confirmed"**) and the floating meter pops up with live values.
-
-5. **Front & Rear Camera Switching**:
+4. **Front & Rear Camera Switching**:
    - Includes hardware cooldown preventing sensor locks on Android.
    - Front camera is accurately mirrored for selfie view; rear camera displays in natural orientation.

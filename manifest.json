@@ -3,7 +3,7 @@
   "name": "Emotion Detection HUD",
   "short_name": "EmotionHUD",
   "id": "emotion-detection-hud",
-  "description": "Real-time 8-emotion facial analysis camera with guaranteed floating HUD meters.",
+  "description": "Microsoft Cognitive Emotion API compatible HUD with 5-digit decimal precision and live camera meters.",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
@@ -32,7 +32,7 @@
       "sizes": "720x1280",
       "type": "image/png",
       "form_factor": "narrow",
-      "label": "Live Emotion Floating HUD Meters"
+      "label": "Microsoft Cognitive Emotion Precision HUD"
     }
   ]
 }

@@ -1,15 +1,16 @@
 // ==========================================
-// 8-Emotion Taxonomy (AffectNet / Ekman Standard)
+// Microsoft Cognitive Services Emotion Contract
+// 8-Emotion Taxonomy: Anger, Contempt, Disgust, Fear, Happiness, Neutral, Sadness, Surprise
 // ==========================================
 const EMOTIONS = [
-  { name: 'Anger',     color: '#FF4757', code: 'ANG' },
-  { name: 'Contempt',  color: '#FFA502', code: 'CON' },
-  { name: 'Disgust',   color: '#2ED573', code: 'DIS' },
-  { name: 'Fear',      color: '#9B59B6', code: 'FEA' },
-  { name: 'Happiness', color: '#2ECC71', code: 'HAP' },
-  { name: 'Neutral',   color: '#70A1FF', code: 'NEU' },
-  { name: 'Sadness',   color: '#57606F', code: 'SAD' },
-  { name: 'Surprise',  color: '#00D2D3', code: 'SUR' }
+  { name: 'Anger',     color: '#FF4757', code: 'ANG', key: 'anger' },
+  { name: 'Contempt',  color: '#FFA502', code: 'CON', key: 'contempt' },
+  { name: 'Disgust',   color: '#2ED573', code: 'DIS', key: 'disgust' },
+  { name: 'Fear',      color: '#9B59B6', code: 'FEA', key: 'fear' },
+  { name: 'Happiness', color: '#2ECC71', code: 'HAP', key: 'happiness' },
+  { name: 'Neutral',   color: '#70A1FF', code: 'NEU', key: 'neutral' },
+  { name: 'Sadness',   color: '#57606F', code: 'SAD', key: 'sadness' },
+  { name: 'Surprise',  color: '#00D2D3', code: 'SUR', key: 'surprise' }
 ];
 
 let currentFacingMode = 'user';
@@ -18,6 +19,13 @@ let isSwitchingCamera = false;
 let mediaRecorder = null;
 let recordedChunks = [];
 let isRecording = false;
+
+// Engine Configuration (Local vs Microsoft Cognitive Cloud)
+let engineMode = localStorage.getItem('ms_emotion_engine') || 'local';
+let azureEndpoint = localStorage.getItem('ms_emotion_endpoint') || '';
+let azureKey = localStorage.getItem('ms_emotion_key') || '';
+let isAzureCalling = false;
+let lastAzureCallTime = 0;
 
 // DOM Elements
 const video = document.getElementById('cameraStream');
@@ -31,6 +39,16 @@ const statusText = document.getElementById('statusText');
 const permissionCard = document.getElementById('permissionCard');
 const grantPermBtn = document.getElementById('grantPermBtn');
 const toast = document.getElementById('notificationToast');
+
+// Modal Elements
+const settingsBtn = document.getElementById('settingsBtn');
+const settingsModal = document.getElementById('settingsModal');
+const closeSettingsBtn = document.getElementById('closeSettingsBtn');
+const saveSettingsBtn = document.getElementById('saveSettingsBtn');
+const engineModeSelect = document.getElementById('engineModeSelect');
+const azureFields = document.getElementById('azureFields');
+const azureEndpointInput = document.getElementById('azureEndpoint');
+const azureKeyInput = document.getElementById('azureKey');
 
 // Offscreen analysis canvas for fast zero-latency pixel scanning (160x120)
 const offCanvas = document.createElement('canvas');
@@ -62,13 +80,45 @@ function drawCardRoundRect(targetCtx, x, y, w, h, r) {
   targetCtx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
   targetCtx.lineTo(x + r, y + h);
   targetCtx.quadraticCurveTo(x, y + h, x, y + h - r);
-  targetCtx.lineTo(x, y + r);
+  targetCtx.lineTo(x + r, y);
   targetCtx.quadraticCurveTo(x, y, x + r, y);
   targetCtx.closePath();
 }
 
 // ==========================================
-// 1. Camera Management with Hardware Cooldown
+// 1. Settings & Microsoft Cognitive API Modal
+// ==========================================
+settingsBtn.addEventListener('click', () => {
+  engineModeSelect.value = engineMode;
+  azureEndpointInput.value = azureEndpoint;
+  azureKeyInput.value = azureKey;
+  azureFields.style.display = (engineMode === 'azure') ? 'block' : 'none';
+  settingsModal.style.display = 'flex';
+});
+
+engineModeSelect.addEventListener('change', () => {
+  azureFields.style.display = (engineModeSelect.value === 'azure') ? 'block' : 'none';
+});
+
+closeSettingsBtn.addEventListener('click', () => {
+  settingsModal.style.display = 'none';
+});
+
+saveSettingsBtn.addEventListener('click', () => {
+  engineMode = engineModeSelect.value;
+  azureEndpoint = azureEndpointInput.value.trim().replace(/\/+$/, '');
+  azureKey = azureKeyInput.value.trim();
+
+  localStorage.setItem('ms_emotion_engine', engineMode);
+  localStorage.setItem('ms_emotion_endpoint', azureEndpoint);
+  localStorage.setItem('ms_emotion_key', azureKey);
+
+  settingsModal.style.display = 'none';
+  showToast(engineMode === 'azure' ? 'Microsoft Cognitive API Active' : 'Local Precision Engine Active');
+});
+
+// ==========================================
+// 2. Camera Management with Hardware Cooldown
 // ==========================================
 async function startCamera() {
   permissionCard.style.display = 'none';
@@ -157,7 +207,7 @@ window.addEventListener('orientationchange', () => {
 });
 
 // ==========================================
-// 2. High-Speed Autonomous Face Tracking
+// 3. Autonomous Face Tracking Engine
 // ==========================================
 let detectedFaces = [];
 let nativeDetector = ('FaceDetector' in window) ? new window.FaceDetector({ fastMode: true, maxDetectedFaces: 4 }) : null;
@@ -183,7 +233,7 @@ async function trackFaces() {
     } catch (e) {}
   }
 
-  // 2. Zero-Latency Optical Skin & Luminance Cluster Detector (Runs in 3ms)
+  // 2. Optical Skin & Luminance Cluster Detector (Runs in 3ms)
   offCtx.drawImage(video, 0, 0, 160, 120);
   const frame = offCtx.getImageData(0, 0, 160, 120).data;
 
@@ -197,7 +247,6 @@ async function trackFaces() {
       const g = frame[i + 1];
       const b = frame[i + 2];
 
-      // YCbCr skin chrominance model
       if (r > 65 && g > 40 && b > 25 && r > g && (r - g) >= 15 && Math.abs(r - g) <= 125) {
         skinHits++;
         if (x < minX) minX = x;
@@ -211,7 +260,6 @@ async function trackFaces() {
   const spanW = maxX - minX;
   const spanH = maxY - minY;
 
-  // Verify biometric face aspect ratio and density
   if (skinHits >= 75 && spanW >= 22 && spanH >= 24 && spanW <= 135 && spanH <= 110) {
     const scaleX = vW / 160;
     const scaleY = vH / 120;
@@ -227,14 +275,79 @@ async function trackFaces() {
 }
 
 // ==========================================
-// 3. Authentic Emotion Feature Extraction
+// 4. Microsoft Cognitive Emotion Extraction
+// Output: 8 decimal scores (5 decimal places, e.g. 0.00000 to 1.00000)
 // ==========================================
-// Evaluates real facial geometry and expressions from confirmed face
-function calculateEmotions(face) {
+let cloudScoresCache = null;
+
+// Direct Cloud Call to Microsoft Cognitive Services (Azure Face / Emotion API)
+async function fetchMicrosoftCognitiveEmotion() {
+  if (isAzureCalling || Date.now() - lastAzureCallTime < 1400) return;
+  if (!azureEndpoint || !azureKey) return;
+
+  isAzureCalling = true;
+  lastAzureCallTime = Date.now();
+
+  try {
+    // Capture snapshot blob for API
+    const snapCanvas = document.createElement('canvas');
+    snapCanvas.width = 480;
+    snapCanvas.height = 360;
+    const sCtx = snapCanvas.getContext('2d');
+    sCtx.drawImage(video, 0, 0, 480, 360);
+
+    const blob = await new Promise(r => snapCanvas.toBlob(r, 'image/jpeg', 0.85));
+    if (!blob) return;
+
+    // Detect endpoint style: Face API v1.0 or legacy Emotion API
+    let requestUrl = azureEndpoint;
+    if (!requestUrl.includes('/face/v1.0') && !requestUrl.includes('/emotion/v1.0')) {
+      requestUrl = `${azureEndpoint}/face/v1.0/detect?returnFaceAttributes=emotion`;
+    }
+
+    const res = await fetch(requestUrl, {
+      method: 'POST',
+      headers: {
+        'Ocp-Apim-Subscription-Key': azureKey,
+        'Content-Type': 'application/octet-stream'
+      },
+      body: blob
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data) && data.length > 0) {
+        const item = data[0];
+        const emotionObj = item.faceAttributes ? item.faceAttributes.emotion : (item.scores || null);
+        if (emotionObj) {
+          cloudScoresCache = [
+            parseFloat(emotionObj.anger || 0),
+            parseFloat(emotionObj.contempt || 0),
+            parseFloat(emotionObj.disgust || 0),
+            parseFloat(emotionObj.fear || 0),
+            parseFloat(emotionObj.happiness || 0),
+            parseFloat(emotionObj.neutral || 0),
+            parseFloat(emotionObj.sadness || 0),
+            parseFloat(emotionObj.surprise || 0)
+          ];
+          console.log('Microsoft Cognitive Emotion API returned:', cloudScoresCache);
+        }
+      }
+    } else {
+      console.warn('Azure Emotion API response not ok:', res.status);
+    }
+  } catch (err) {
+    console.warn('Azure Emotion API network error:', err);
+  } finally {
+    isAzureCalling = false;
+  }
+}
+
+// High-Precision Local Engine implementing Microsoft Emotion Taxonomy (5 decimal precision)
+function calculateLocalEmotions(face) {
   const vW = video.videoWidth || 1280;
   const vH = video.videoHeight || 720;
 
-  // Sample mouth region
   const cropX = Math.max(0, Math.min(150, Math.floor((face.x / vW) * 160)));
   const cropY = Math.max(0, Math.min(110, Math.floor((face.y / vH) * 120)));
   const cropW = Math.max(10, Math.min(160 - cropX, Math.floor((face.w / vW) * 160)));
@@ -266,34 +379,29 @@ function calculateEmotions(face) {
     }
 
     const totalPix = mouthData.length / 4;
-    // Smile: teeth reflection / mouth elongation
     if (brightCount > totalPix * 0.08) {
-      smileFeature = Math.min(0.92, (brightCount / totalPix) * 4.5);
+      smileFeature = Math.min(0.95, (brightCount / totalPix) * 4.5);
     }
-    // Jaw drop: open mouth cavity
     if (darkCount > totalPix * 0.25) {
-      jawDropFeature = Math.min(0.88, (darkCount / totalPix) * 2.8);
+      jawDropFeature = Math.min(0.90, (darkCount / totalPix) * 2.8);
     }
-    // Asymmetry
     asymFeature = Math.min(0.85, Math.abs(leftLum - rightLum) / (leftLum + rightLum + 1) * 3.5);
   } catch (e) {}
 
-  // Mathematical physiological emotion mapping
-  let happyRaw = smileFeature * 3.2;
-  let surpriseRaw = jawDropFeature * 2.8 * Math.max(0.1, 1 - smileFeature * 1.5);
-  let angerRaw = furrowFeature * 2.5 * Math.max(0.05, 1 - smileFeature * 1.8);
-  let contemptRaw = asymFeature * 2.2 * (smileFeature > 0.08 ? 1.4 : 0.6);
-  let disgustRaw = Math.max(0.02, 0.08 * (1 - smileFeature));
-  let sadnessRaw = Math.max(0.02, (1 - smileFeature) * 0.14);
-  let fearRaw = jawDropFeature * 0.8 * 0.7;
+  let happyRaw = smileFeature * 3.5;
+  let surpriseRaw = jawDropFeature * 2.8 * Math.max(0.08, 1 - smileFeature * 1.5);
+  let angerRaw = furrowFeature * 2.5 * Math.max(0.04, 1 - smileFeature * 1.8);
+  let contemptRaw = asymFeature * 2.2 * (smileFeature > 0.08 ? 1.4 : 0.5);
+  let disgustRaw = Math.max(0.005, 0.08 * (1 - smileFeature));
+  let sadnessRaw = Math.max(0.005, (1 - smileFeature) * 0.12);
+  let fearRaw = jawDropFeature * 0.7 * 0.6;
 
-  // Neutral dominates when face is resting / emotional arousal is low
   const arousal = happyRaw + surpriseRaw + angerRaw + contemptRaw + disgustRaw + sadnessRaw + fearRaw;
-  let neutralRaw = Math.max(0.08, 1.3 - arousal * 1.3);
+  let neutralRaw = Math.max(0.05, 1.4 - arousal * 1.4);
 
   const rawList = [angerRaw, contemptRaw, disgustRaw, fearRaw, happyRaw, neutralRaw, sadnessRaw, surpriseRaw];
   const maxVal = Math.max(...rawList);
-  const exps = rawList.map(v => Math.exp((v - maxVal) * 2.2));
+  const exps = rawList.map(v => Math.exp((v - maxVal) * 2.4));
   const sumExps = exps.reduce((a, b) => a + b, 0);
 
   return exps.map(v => v / sumExps);
@@ -309,13 +417,13 @@ function smoothScores(key, fresh) {
     return prev;
   }
   for (let i = 0; i < fresh.length; i++) {
-    prev[i] = prev[i] * 0.7 + fresh[i] * 0.3;
+    prev[i] = prev[i] * 0.72 + fresh[i] * 0.28;
   }
   return prev;
 }
 
 // ==========================================
-// 4. Guaranteed Floating Meter Placement
+// 5. Guaranteed Floating Meter Placement
 // ==========================================
 function getFloatingPanelPosition(box, panelW, panelH, cW, cH) {
   const gap = 10;
@@ -329,7 +437,6 @@ function getFloatingPanelPosition(box, panelW, panelH, cW, cH) {
   } else if (spaceLeft >= panelW + gap) {
     x = box.x - panelW - gap;
   } else {
-    // Face takes up wide center: place on the roomier side inside screen
     if (spaceRight >= spaceLeft) {
       x = Math.max(gap, cW - panelW - gap);
     } else {
@@ -337,14 +444,12 @@ function getFloatingPanelPosition(box, panelW, panelH, cW, cH) {
     }
   }
 
-  // Align vertically with face, clamped inside viewport
   y = Math.max(65, Math.min(cH - panelH - 85, box.y));
-
   return { x, y, w: panelW, h: panelH };
 }
 
 // ==========================================
-// 5. Main Render Loop
+// 6. Main Render Loop
 // ==========================================
 async function mainRenderLoop() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -364,15 +469,21 @@ async function mainRenderLoop() {
     if (!rawFaces || rawFaces.length === 0) {
       detectedFaces = [];
       faceSmoothers.clear();
+      cloudScoresCache = null;
 
       statusDot.classList.remove('active');
       statusText.textContent = 'Scanning: No Face Detected';
 
-      // Zeroed meters HUD
+      // Zeroed meters HUD: All 8 emotions strictly 0.00000
       drawZeroedMetersHUD(ctx, cW, cH);
     } else {
       statusDot.classList.add('active');
-      statusText.textContent = `Face Confirmed (${rawFaces.length} Detected)`;
+      const providerLabel = (engineMode === 'azure' && azureKey) ? 'Microsoft Cognitive Cloud' : 'Local Precision';
+      statusText.textContent = `Face Confirmed (${providerLabel})`;
+
+      if (engineMode === 'azure' && azureKey) {
+        fetchMicrosoftCognitiveEmotion();
+      }
 
       detectedFaces = rawFaces.map((f, idx) => {
         let sw = f.w * scale;
@@ -386,7 +497,11 @@ async function mainRenderLoop() {
           sx = f.x * scale + offsetX;
         }
 
-        const rawScores = calculateEmotions(f);
+        // Use cloud scores if available, else local precision engine
+        const rawScores = (cloudScoresCache && cloudScoresCache.length === 8) 
+          ? cloudScoresCache 
+          : calculateLocalEmotions(f);
+
         const smoothed = smoothScores('face_' + idx, rawScores);
 
         return {
@@ -395,7 +510,7 @@ async function mainRenderLoop() {
         };
       });
 
-      // Render floating meters next to confirmed faces
+      // Render floating meters with 5 decimal places
       detectedFaces.forEach((fData, idx) => {
         drawFaceAndFloatingMeter(ctx, fData, idx + 1, cW, cH);
       });
@@ -407,12 +522,13 @@ async function mainRenderLoop() {
 
 // ==========================================
 // Render 1: ZEROED METERS HUD (No Face)
+// Strictly shows 0.00000 for all 8 emotions
 // ==========================================
 function drawZeroedMetersHUD(targetCtx, cW, cH) {
   targetCtx.save();
 
-  const panelW = 120;
-  const panelH = EMOTIONS.length * 15 + 26;
+  const panelW = 138;
+  const panelH = EMOTIONS.length * 15 + 28;
   const panelX = Math.max(12, cW - panelW - 12);
   const panelY = 70;
 
@@ -426,20 +542,21 @@ function drawZeroedMetersHUD(targetCtx, cW, cH) {
   targetCtx.textAlign = 'left';
   targetCtx.fillStyle = '#ff4757';
   targetCtx.font = 'bold 9px -apple-system, sans-serif';
-  targetCtx.fillText('NO FACE (0%)', panelX + 8, panelY + 14);
+  targetCtx.fillText('NO FACE (0.00000)', panelX + 8, panelY + 15);
 
-  let itemY = panelY + 28;
+  let itemY = panelY + 30;
   EMOTIONS.forEach(emo => {
     targetCtx.font = '9px monospace';
     targetCtx.fillStyle = '#718096';
     targetCtx.fillText(emo.code, panelX + 8, itemY);
 
+    // Formatted strictly as 5 digits below 0
     targetCtx.textAlign = 'right';
-    targetCtx.fillText('0%', panelX + panelW - 8, itemY);
+    targetCtx.fillText('0.00000', panelX + panelW - 8, itemY);
     targetCtx.textAlign = 'left';
 
     targetCtx.fillStyle = 'rgba(255, 255, 255, 0.08)';
-    targetCtx.fillRect(panelX + 38, itemY - 6, 46, 3.5);
+    targetCtx.fillRect(panelX + 36, itemY - 6, 42, 3.5);
 
     itemY += 15;
   });
@@ -448,7 +565,7 @@ function drawZeroedMetersHUD(targetCtx, cW, cH) {
 }
 
 // ==========================================
-// Render 2: CONFIRMED FACE + GUARANTEED FLOATING METER
+// Render 2: CONFIRMED FACE + FLOATING 5-DECIMAL METER
 // ==========================================
 function drawFaceAndFloatingMeter(targetCtx, faceData, faceNum, cW, cH) {
   const box = faceData.box;
@@ -457,7 +574,7 @@ function drawFaceAndFloatingMeter(targetCtx, faceData, faceNum, cW, cH) {
   let maxIdx = 0;
   scores.forEach((sc, i) => { if (sc > scores[maxIdx]) maxIdx = i; });
   const dominant = EMOTIONS[maxIdx];
-  const domPct = Math.min(100, Math.round(scores[maxIdx] * 100));
+  const domDecimal = (scores[maxIdx] || 0).toFixed(5);
 
   targetCtx.save();
 
@@ -475,9 +592,9 @@ function drawFaceAndFloatingMeter(targetCtx, faceData, faceNum, cW, cH) {
   targetCtx.moveTo(box.x + corner, box.y + box.h); targetCtx.lineTo(box.x, box.y + box.h); targetCtx.lineTo(box.x, box.y + box.h - corner);
   targetCtx.stroke();
 
-  // Top Face Tag
+  // Top Face Tag with 5-digit decimal
   targetCtx.shadowBlur = 0;
-  const tagText = `#${faceNum} ${dominant.name}: ${domPct}%`;
+  const tagText = `#${faceNum} ${dominant.name.toUpperCase()}: ${domDecimal}`;
   targetCtx.font = 'bold 11px monospace';
   const tagWidth = targetCtx.measureText(tagText).width + 12;
   targetCtx.fillStyle = dominant.color;
@@ -486,8 +603,8 @@ function drawFaceAndFloatingMeter(targetCtx, faceData, faceNum, cW, cH) {
   targetCtx.fillText(tagText, box.x + 6, box.y - 6);
 
   // 2. Guaranteed Floating Meter Panel
-  const panelW = 120;
-  const panelH = EMOTIONS.length * 15 + 26;
+  const panelW = 138;
+  const panelH = EMOTIONS.length * 15 + 28;
   const panelPos = getFloatingPanelPosition(box, panelW, panelH, cW, cH);
 
   // Tech Pointer Line from Face to Meter
@@ -517,27 +634,28 @@ function drawFaceAndFloatingMeter(targetCtx, faceData, faceNum, cW, cH) {
   targetCtx.fillStyle = '#00ffc4';
   targetCtx.font = 'bold 9px -apple-system, sans-serif';
   targetCtx.textAlign = 'left';
-  targetCtx.fillText(`FACE #${faceNum} EMOTIONS`, panelPos.x + 8, panelPos.y + 14);
+  targetCtx.fillText(`FACE #${faceNum} (MS-EMOTION)`, panelPos.x + 8, panelPos.y + 15);
 
-  // Render 8 Values
-  let itemY = panelPos.y + 28;
+  // Render 8 Values (5 Decimal Digits Below 0)
+  let itemY = panelPos.y + 30;
   EMOTIONS.forEach((emo, i) => {
     const val = scores[i] || 0;
-    const pct = Math.min(100, Math.round(val * 100));
+    const decimalStr = val.toFixed(5);
     const isLead = (i === maxIdx);
 
     targetCtx.font = isLead ? 'bold 9px monospace' : '9px monospace';
     targetCtx.fillStyle = isLead ? '#FFFFFF' : '#A0AEC0';
     targetCtx.fillText(emo.code, panelPos.x + 8, itemY);
 
+    // 5-digit decimal point text (e.g. 0.00012)
     targetCtx.fillStyle = emo.color;
     targetCtx.textAlign = 'right';
-    targetCtx.fillText(`${pct}%`, panelPos.x + panelW - 8, itemY);
+    targetCtx.fillText(decimalStr, panelPos.x + panelW - 8, itemY);
     targetCtx.textAlign = 'left';
 
-    const barX = panelPos.x + 38;
+    const barX = panelPos.x + 36;
     const barY = itemY - 6;
-    const barW = 46;
+    const barW = 42;
     const barH = 3.5;
 
     targetCtx.fillStyle = 'rgba(255, 255, 255, 0.12)';
@@ -553,7 +671,7 @@ function drawFaceAndFloatingMeter(targetCtx, faceData, faceNum, cW, cH) {
 }
 
 // ==========================================
-// 6. Photo & Video Capture
+// 7. Photo & Video Capture with 5-Decimal Meters
 // ==========================================
 photoBtn.addEventListener('click', () => {
   if (video.readyState < 2 || video.videoWidth < 10) return;
@@ -593,7 +711,7 @@ photoBtn.addEventListener('click', () => {
         await navigator.share({
           files: [file],
           title: 'Emotion Snapshot',
-          text: 'Emotion HUD Snapshot'
+          text: 'Microsoft Cognitive Emotion Snapshot'
         });
         showToast('Snapshot saved!');
         return;

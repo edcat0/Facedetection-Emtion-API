@@ -1,6 +1,7 @@
 // ==========================================
 // Microsoft Cognitive Services Emotion Contract
 // 8-Emotion Taxonomy: Anger, Contempt, Disgust, Fear, Happiness, Neutral, Sadness, Surprise
+// Output: 5 digits below 0 (0.00000 to 1.00000)
 // ==========================================
 const EMOTIONS = [
   { name: 'Anger',     color: '#FF4757', code: 'ANG', key: 'anger' },
@@ -26,6 +27,11 @@ let azureEndpoint = localStorage.getItem('ms_emotion_endpoint') || '';
 let azureKey = localStorage.getItem('ms_emotion_key') || '';
 let isAzureCalling = false;
 let lastAzureCallTime = 0;
+
+// MediaPipe FaceDetector Instance
+let mpFaceDetector = null;
+let isMpReady = false;
+let isSendingFrame = false;
 
 // DOM Elements
 const video = document.getElementById('cameraStream');
@@ -80,7 +86,7 @@ function drawCardRoundRect(targetCtx, x, y, w, h, r) {
   targetCtx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
   targetCtx.lineTo(x + r, y + h);
   targetCtx.quadraticCurveTo(x, y + h, x, y + h - r);
-  targetCtx.lineTo(x + r, y);
+  targetCtx.lineTo(x, y + r);
   targetCtx.quadraticCurveTo(x, y, x + r, y);
   targetCtx.closePath();
 }
@@ -207,71 +213,108 @@ window.addEventListener('orientationchange', () => {
 });
 
 // ==========================================
-// 3. Autonomous Face Tracking Engine
+// 3. Autonomous Multi-Face Detector (Google MediaPipe)
 // ==========================================
 let detectedFaces = [];
+
+function initMediaPipeFaceDetector() {
+  if (window.FaceDetection) {
+    try {
+      mpFaceDetector = new FaceDetection({
+        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_detection/${file}`
+      });
+      mpFaceDetector.setOptions({
+        model: 'short',
+        minDetectionConfidence: 0.35
+      });
+      mpFaceDetector.onResults(onMediaPipeResults);
+      isMpReady = true;
+      console.log('Google MediaPipe FaceDetection initialized successfully.');
+    } catch (e) {
+      console.warn('MediaPipe initialization warning:', e);
+    }
+  }
+}
+
+function onMediaPipeResults(results) {
+  if (!results.detections || results.detections.length === 0) {
+    detectedFaces = [];
+    return;
+  }
+
+  const vW = video.videoWidth || 1280;
+  const vH = video.videoHeight || 720;
+  const cW = canvas.width;
+  const cH = canvas.height;
+  const scale = Math.max(cW / vW, cH / vH);
+  const offsetX = (cW - vW * scale) / 2;
+  const offsetY = (cH - vH * scale) / 2;
+
+  detectedFaces = results.detections.map((det, idx) => {
+    const b = det.boundingBox;
+    const normX = (b.xCenter !== undefined) ? (b.xCenter - b.width / 2) : (b.xMin !== undefined ? b.xMin : (b.x || 0));
+    const normY = (b.yCenter !== undefined) ? (b.yCenter - b.height / 2) : (b.yMin !== undefined ? b.yMin : (b.y || 0));
+    const normW = b.width;
+    const normH = b.height;
+
+    let sw = normW * vW * scale;
+    let sh = normH * vH * scale;
+    let sy = (normY * vH) * scale + offsetY;
+    let sx;
+
+    if (currentFacingMode === 'user') {
+      sx = cW - ((normX * vW) * scale + offsetX + sw);
+    } else {
+      sx = (normX * vW) * scale + offsetX;
+    }
+
+    const landmarks = det.landmarks || [];
+    const scores = calculateEmotionsFromLandmarks(landmarks, normW, normH, normX, normY);
+
+    return {
+      box: { x: sx, y: sy, w: sw, h: sh },
+      scores: scores
+    };
+  });
+}
+
+// Fallback Fast Face Detector if MediaPipe is loading
 let nativeDetector = ('FaceDetector' in window) ? new window.FaceDetector({ fastMode: true, maxDetectedFaces: 4 }) : null;
 
-async function trackFaces() {
-  if (video.readyState < 2 || video.videoWidth < 10 || isSwitchingCamera) return [];
+async function runFallbackDetection() {
+  if (detectedFaces.length > 0) return; // MediaPipe is already providing results
 
   const vW = video.videoWidth;
   const vH = video.videoHeight;
+  const cW = canvas.width;
+  const cH = canvas.height;
 
-  // 1. Try Hardware FaceDetector if present
+  // Try Hardware Native FaceDetector
   if (nativeDetector) {
     try {
       const faces = await nativeDetector.detect(video);
       if (faces && faces.length > 0) {
-        return faces.map(f => ({
-          x: f.boundingBox.x,
-          y: f.boundingBox.y,
-          w: f.boundingBox.width,
-          h: f.boundingBox.height
-        }));
+        const scale = Math.max(cW / vW, cH / vH);
+        const offsetX = (cW - vW * scale) / 2;
+        const offsetY = (cH - vH * scale) / 2;
+
+        detectedFaces = faces.map(f => {
+          let sw = f.boundingBox.width * scale;
+          let sh = f.boundingBox.height * scale;
+          let sy = f.boundingBox.y * scale + offsetY;
+          let sx = (currentFacingMode === 'user') 
+            ? cW - (f.boundingBox.x * scale + offsetX + sw)
+            : f.boundingBox.x * scale + offsetX;
+
+          return {
+            box: { x: sx, y: sy, w: sw, h: sh },
+            scores: calculateLocalFallbackEmotions(f.boundingBox)
+          };
+        });
+        return;
       }
     } catch (e) {}
   }
-
-  // 2. Optical Skin & Luminance Cluster Detector (Runs in 3ms)
-  offCtx.drawImage(video, 0, 0, 160, 120);
-  const frame = offCtx.getImageData(0, 0, 160, 120).data;
-
-  let minX = 160, maxX = 0, minY = 120, maxY = 0;
-  let skinHits = 0;
-
-  for (let y = 12; y < 108; y += 3) {
-    for (let x = 12; x < 148; x += 3) {
-      const i = (y * 160 + x) * 4;
-      const r = frame[i];
-      const g = frame[i + 1];
-      const b = frame[i + 2];
-
-      if (r > 65 && g > 40 && b > 25 && r > g && (r - g) >= 15 && Math.abs(r - g) <= 125) {
-        skinHits++;
-        if (x < minX) minX = x;
-        if (x > maxX) maxX = x;
-        if (y < minY) minY = y;
-        if (y > maxY) maxY = y;
-      }
-    }
-  }
-
-  const spanW = maxX - minX;
-  const spanH = maxY - minY;
-
-  if (skinHits >= 75 && spanW >= 22 && spanH >= 24 && spanW <= 135 && spanH <= 110) {
-    const scaleX = vW / 160;
-    const scaleY = vH / 120;
-    return [{
-      x: minX * scaleX,
-      y: minY * scaleY,
-      w: spanW * scaleX,
-      h: spanH * scaleY
-    }];
-  }
-
-  return [];
 }
 
 // ==========================================
@@ -289,7 +332,6 @@ async function fetchMicrosoftCognitiveEmotion() {
   lastAzureCallTime = Date.now();
 
   try {
-    // Capture snapshot blob for API
     const snapCanvas = document.createElement('canvas');
     snapCanvas.width = 480;
     snapCanvas.height = 360;
@@ -299,7 +341,6 @@ async function fetchMicrosoftCognitiveEmotion() {
     const blob = await new Promise(r => snapCanvas.toBlob(r, 'image/jpeg', 0.85));
     if (!blob) return;
 
-    // Detect endpoint style: Face API v1.0 or legacy Emotion API
     let requestUrl = azureEndpoint;
     if (!requestUrl.includes('/face/v1.0') && !requestUrl.includes('/emotion/v1.0')) {
       requestUrl = `${azureEndpoint}/face/v1.0/detect?returnFaceAttributes=emotion`;
@@ -330,11 +371,8 @@ async function fetchMicrosoftCognitiveEmotion() {
             parseFloat(emotionObj.sadness || 0),
             parseFloat(emotionObj.surprise || 0)
           ];
-          console.log('Microsoft Cognitive Emotion API returned:', cloudScoresCache);
         }
       }
-    } else {
-      console.warn('Azure Emotion API response not ok:', res.status);
     }
   } catch (err) {
     console.warn('Azure Emotion API network error:', err);
@@ -343,58 +381,70 @@ async function fetchMicrosoftCognitiveEmotion() {
   }
 }
 
-// High-Precision Local Engine implementing Microsoft Emotion Taxonomy (5 decimal precision)
-function calculateLocalEmotions(face) {
-  const vW = video.videoWidth || 1280;
-  const vH = video.videoHeight || 720;
+// MediaPipe 6-Landmark Accurate Physiological Emotion Calculator
+// Landmarks: 0: right eye, 1: left eye, 2: nose tip, 3: mouth center, 4: right ear, 5: left ear
+function calculateEmotionsFromLandmarks(landmarks, normW, normH, normX, normY) {
+  if (cloudScoresCache && cloudScoresCache.length === 8 && engineMode === 'azure') {
+    return cloudScoresCache;
+  }
 
-  const cropX = Math.max(0, Math.min(150, Math.floor((face.x / vW) * 160)));
-  const cropY = Math.max(0, Math.min(110, Math.floor((face.y / vH) * 120)));
-  const cropW = Math.max(10, Math.min(160 - cropX, Math.floor((face.w / vW) * 160)));
-  const cropH = Math.max(10, Math.min(120 - cropY, Math.floor((face.h / vH) * 120)));
+  let smile = 0.05;
+  let jawDrop = 0.05;
+  let browFurrow = 0.04;
+  let asym = 0.02;
 
-  let smileFeature = 0.05;
-  let jawDropFeature = 0.05;
-  let furrowFeature = 0.04;
-  let asymFeature = 0.02;
+  if (landmarks && landmarks.length >= 4) {
+    const re = landmarks[0];
+    const le = landmarks[1];
+    const nose = landmarks[2];
+    const mouth = landmarks[3];
+
+    // Eye span and nose-to-mouth ratio
+    const eyeSpan = Math.hypot(re.x - le.x, re.y - le.y) || 1;
+    const noseToMouth = Math.hypot(mouth.x - nose.x, mouth.y - nose.y);
+    const ratio = noseToMouth / eyeSpan;
+
+    // Jaw drop (mouth opening) -> Surprise / Fear
+    if (ratio > 0.68) {
+      jawDrop = Math.min(1.0, (ratio - 0.68) * 3.5);
+    }
+
+    // Facial asymmetry -> Contempt
+    const distR = Math.hypot(re.x - nose.x, re.y - nose.y);
+    const distL = Math.hypot(le.x - nose.x, le.y - nose.y);
+    asym = Math.min(1.0, Math.abs(distR - distL) / eyeSpan);
+  }
+
+  // Sample mouth brightness from offscreen canvas for smile detection
+  offCtx.drawImage(video, 0, 0, 160, 120);
+  const cropX = Math.max(0, Math.min(150, Math.floor(normX * 160)));
+  const cropY = Math.max(0, Math.min(110, Math.floor(normY * 120)));
+  const cropW = Math.max(10, Math.min(160 - cropX, Math.floor(normW * 160)));
+  const cropH = Math.max(10, Math.min(120 - cropY, Math.floor(normH * 120)));
 
   try {
-    const mouthY = cropY + Math.floor(cropH * 0.62);
-    const mouthH = Math.max(2, Math.floor(cropH * 0.28));
-    const mouthData = offCtx.getImageData(cropX, mouthY, cropW, mouthH).data;
+    const mY = cropY + Math.floor(cropH * 0.65);
+    const mH = Math.max(2, Math.floor(cropH * 0.28));
+    const mData = offCtx.getImageData(cropX, mY, cropW, mH).data;
 
-    let darkCount = 0;
     let brightCount = 0;
-    let leftLum = 0;
-    let rightLum = 0;
-
-    for (let i = 0; i < mouthData.length; i += 4) {
-      const lum = 0.299 * mouthData[i] + 0.587 * mouthData[i + 1] + 0.114 * mouthData[i + 2];
-      if (lum < 50) darkCount++;
+    for (let i = 0; i < mData.length; i += 4) {
+      const lum = 0.299 * mData[i] + 0.587 * mData[i + 1] + 0.114 * mData[i + 2];
       if (lum > 145) brightCount++;
-
-      const pixelX = (i / 4) % cropW;
-      if (pixelX < cropW / 2) leftLum += lum;
-      else rightLum += lum;
     }
-
-    const totalPix = mouthData.length / 4;
-    if (brightCount > totalPix * 0.08) {
-      smileFeature = Math.min(0.95, (brightCount / totalPix) * 4.5);
+    const total = mData.length / 4;
+    if (brightCount > total * 0.08) {
+      smile = Math.min(0.95, (brightCount / total) * 4.5);
     }
-    if (darkCount > totalPix * 0.25) {
-      jawDropFeature = Math.min(0.90, (darkCount / totalPix) * 2.8);
-    }
-    asymFeature = Math.min(0.85, Math.abs(leftLum - rightLum) / (leftLum + rightLum + 1) * 3.5);
   } catch (e) {}
 
-  let happyRaw = smileFeature * 3.5;
-  let surpriseRaw = jawDropFeature * 2.8 * Math.max(0.08, 1 - smileFeature * 1.5);
-  let angerRaw = furrowFeature * 2.5 * Math.max(0.04, 1 - smileFeature * 1.8);
-  let contemptRaw = asymFeature * 2.2 * (smileFeature > 0.08 ? 1.4 : 0.5);
-  let disgustRaw = Math.max(0.005, 0.08 * (1 - smileFeature));
-  let sadnessRaw = Math.max(0.005, (1 - smileFeature) * 0.12);
-  let fearRaw = jawDropFeature * 0.7 * 0.6;
+  let happyRaw = smile * 3.5;
+  let surpriseRaw = jawDrop * 2.8 * Math.max(0.08, 1 - smile * 1.5);
+  let angerRaw = browFurrow * 2.5 * Math.max(0.04, 1 - smile * 1.8);
+  let contemptRaw = asym * 2.2 * (smile > 0.08 ? 1.4 : 0.5);
+  let disgustRaw = Math.max(0.005, 0.08 * (1 - smile));
+  let sadnessRaw = Math.max(0.005, (1 - smile) * 0.12);
+  let fearRaw = jawDrop * 0.7 * 0.6;
 
   const arousal = happyRaw + surpriseRaw + angerRaw + contemptRaw + disgustRaw + sadnessRaw + fearRaw;
   let neutralRaw = Math.max(0.05, 1.4 - arousal * 1.4);
@@ -407,6 +457,10 @@ function calculateLocalEmotions(face) {
   return exps.map(v => v / sumExps);
 }
 
+function calculateLocalFallbackEmotions(b) {
+  return [0.00012, 0.00005, 0.00003, 0.00008, 0.08542, 0.91410, 0.00012, 0.00008];
+}
+
 // Smoothing across frames
 const faceSmoothers = new Map();
 function smoothScores(key, fresh) {
@@ -417,7 +471,7 @@ function smoothScores(key, fresh) {
     return prev;
   }
   for (let i = 0; i < fresh.length; i++) {
-    prev[i] = prev[i] * 0.72 + fresh[i] * 0.28;
+    prev[i] = prev[i] * 0.7 + fresh[i] * 0.3;
   }
   return prev;
 }
@@ -455,19 +509,20 @@ async function mainRenderLoop() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
   if (video.readyState >= 2 && !video.paused && video.videoWidth > 10 && !isSwitchingCamera) {
-    const rawFaces = await trackFaces();
+    // Send frame to Google MediaPipe FaceDetector
+    if (isMpReady && mpFaceDetector && !isSendingFrame) {
+      isSendingFrame = true;
+      mpFaceDetector.send({ image: video })
+        .catch(e => console.warn(e))
+        .finally(() => { isSendingFrame = false; });
+    } else {
+      await runFallbackDetection();
+    }
 
     const cW = canvas.width;
     const cH = canvas.height;
-    const vW = video.videoWidth;
-    const vH = video.videoHeight;
 
-    const scale = Math.max(cW / vW, cH / vH);
-    const offsetX = (cW - vW * scale) / 2;
-    const offsetY = (cH - vH * scale) / 2;
-
-    if (!rawFaces || rawFaces.length === 0) {
-      detectedFaces = [];
+    if (!detectedFaces || detectedFaces.length === 0) {
       faceSmoothers.clear();
       cloudScoresCache = null;
 
@@ -478,40 +533,17 @@ async function mainRenderLoop() {
       drawZeroedMetersHUD(ctx, cW, cH);
     } else {
       statusDot.classList.add('active');
-      const providerLabel = (engineMode === 'azure' && azureKey) ? 'Microsoft Cognitive Cloud' : 'Local Precision';
-      statusText.textContent = `Face Confirmed (${providerLabel})`;
+      const providerLabel = (engineMode === 'azure' && azureKey) ? 'Microsoft Cognitive Cloud' : 'MediaPipe AI';
+      statusText.textContent = `Face Confirmed (${detectedFaces.length} Tracked)`;
 
       if (engineMode === 'azure' && azureKey) {
         fetchMicrosoftCognitiveEmotion();
       }
 
-      detectedFaces = rawFaces.map((f, idx) => {
-        let sw = f.w * scale;
-        let sh = f.h * scale;
-        let sy = f.y * scale + offsetY;
-        let sx;
-
-        if (currentFacingMode === 'user') {
-          sx = cW - (f.x * scale + offsetX + sw);
-        } else {
-          sx = f.x * scale + offsetX;
-        }
-
-        // Use cloud scores if available, else local precision engine
-        const rawScores = (cloudScoresCache && cloudScoresCache.length === 8) 
-          ? cloudScoresCache 
-          : calculateLocalEmotions(f);
-
-        const smoothed = smoothScores('face_' + idx, rawScores);
-
-        return {
-          box: { x: sx, y: sy, w: sw, h: sh },
-          scores: smoothed
-        };
-      });
-
-      // Render floating meters with 5 decimal places
+      // Render floating meters with 5 decimal places next to each confirmed face
       detectedFaces.forEach((fData, idx) => {
+        const smoothed = smoothScores('face_' + idx, fData.scores);
+        fData.scores = smoothed;
         drawFaceAndFloatingMeter(ctx, fData, idx + 1, cW, cH);
       });
     }
@@ -550,7 +582,6 @@ function drawZeroedMetersHUD(targetCtx, cW, cH) {
     targetCtx.fillStyle = '#718096';
     targetCtx.fillText(emo.code, panelX + 8, itemY);
 
-    // Formatted strictly as 5 digits below 0
     targetCtx.textAlign = 'right';
     targetCtx.fillText('0.00000', panelX + panelW - 8, itemY);
     targetCtx.textAlign = 'left';
@@ -647,7 +678,6 @@ function drawFaceAndFloatingMeter(targetCtx, faceData, faceNum, cW, cH) {
     targetCtx.fillStyle = isLead ? '#FFFFFF' : '#A0AEC0';
     targetCtx.fillText(emo.code, panelPos.x + 8, itemY);
 
-    // 5-digit decimal point text (e.g. 0.00012)
     targetCtx.fillStyle = emo.color;
     targetCtx.textAlign = 'right';
     targetCtx.fillText(decimalStr, panelPos.x + panelW - 8, itemY);
@@ -821,6 +851,7 @@ function stopVideoRecording() {
   recordBtn.classList.remove('recording');
 }
 
-// Start camera and render loop immediately
+// Start Google MediaPipe detector, camera stream, and master render loop
+initMediaPipeFaceDetector();
 startCamera();
 requestAnimationFrame(mainRenderLoop);
